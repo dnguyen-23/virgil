@@ -889,14 +889,30 @@ class MachLowering(mach: MachProgram, compiler: Compiler, config: MachLoweringCo
 		var i_ptr = normRef1(i_old.inputs[0]);
 		var ft = PointerType.!(i_old.op.typeArgs[0]);
 		var tt = IntType.!(i_old.op.typeArgs[1]);
-		var ttn: IntNorm = mach.intNorm.makeType(tt);
+		var ttn = mach.intNorm.makeType(tt);
 		// Lowering may result in old value being represented as multiple values 
 		var vals = Array<SsaInstr>.new(ttn.sub.length);
-		vals[0] = curBlock.opIntView(ft, IntType.!(ttn.sub[0]), i_ptr);
+		def ptrSubOp = Pointer_TypeCon.!(ft.typeCon).opcache().opSub;
+		// Retrieve pointer as an IntType with width = PointerType.width
+		// Sign extend depending on the toType and whether the leftmostBit is set
+		def i_intPtr = curBlock.pure(ptrSubOp, [i_ptr, context.graph.nullConst(ft)]);
+		def intPtrType = Int.getType(true, ft.width);
+		vals[0] = curBlock.opIntView(intPtrType, IntType.!(ttn.sub[0]), i_intPtr);
 		for (i = 1; i < ttn.sub.length; i++) {
-			// Ignore the other values. Pointer cannot be split across values 
-			vals[i] = context.graph.nullConst(ttn.sub[i]);
+			// all bits of sub vals set to 1 if tt is signed and leftmostbit is set
+			def subIntType = IntType.!(ttn.sub[i]);
+			if (subIntType.signed) {
+				// XXX: use extendBigEnd and then growToN to compute vals 
+				def inputs = [i_intPtr, context.graph.intConst(intPtrType.width - 1)];
+				def signExtend = curBlock.add(intPtrType.opSar(), inputs, Fact.O_NO_SHIFT_CHECK);
+				
+				vals[i] = curBlock.opIntView(intPtrType, IntType.!(ttn.sub[i]), signExtend);
+				Terminal.put1("[MachLowering.genIntViewP] sub scalar: %q\n", ttn.sub[i].render);
+			} else {
+				vals[i] = context.graph.nullConst(IntType.!(ttn.sub[i]));
+			}
 		}
+		Terminal.put1("[MachLowering.genIntViewP] sub types: %d\n", ttn.sub.length);
 		return mapN(i_old, vals);
 	}
 	def genIntViewB(i_old: SsaApplyOp) {
