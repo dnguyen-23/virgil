@@ -4,9 +4,6 @@ def p() -> Pointer {
     return Pointer.NULL + (-1);
 }
 
-def expected() -> u64 {
-    return u64.view(-1);
-}
 def main(a: int) -> int {
     // sign extension test 
     match (a) {

@@ -39,6 +39,40 @@ def main(a: int) -> int {
         30 => return int.view(u30.view<Pointer>(p()));
         31 => return int.view(u31.view<Pointer>(p()));
         32 => return int.view(u32.view<Pointer>(p()));
+
+        // sign extension test 
+        33 => return int.view(u33.view<Pointer>(p()) >> 32);
+        34 => return int.view(u34.view<Pointer>(p()) >> 32);
+        35 => return int.view(u35.view<Pointer>(p()) >> 32);
+        36 => return int.view(u36.view<Pointer>(p()) >> 32);
+        37 => return int.view(u37.view<Pointer>(p()) >> 32);
+        38 => return int.view(u38.view<Pointer>(p()) >> 32);
+        39 => return int.view(u39.view<Pointer>(p()) >> 32);
+        40 => return int.view(u40.view<Pointer>(p()) >> 32);
+        41 => return int.view(u41.view<Pointer>(p()) >> 32);
+        42 => return int.view(u42.view<Pointer>(p()) >> 32);
+        43 => return int.view(u43.view<Pointer>(p()) >> 32);
+        44 => return int.view(u44.view<Pointer>(p()) >> 32);
+        45 => return int.view(u45.view<Pointer>(p()) >> 32);
+        46 => return int.view(u46.view<Pointer>(p()) >> 32);
+        47 => return int.view(u47.view<Pointer>(p()) >> 32);
+        48 => return int.view(u48.view<Pointer>(p()) >> 32);
+        49 => return int.view(u49.view<Pointer>(p()) >> 32);
+        50 => return int.view(u50.view<Pointer>(p()) >> 32);
+        51 => return int.view(u51.view<Pointer>(p()) >> 32);
+        52 => return int.view(u52.view<Pointer>(p()) >> 32);
+        53 => return int.view(u53.view<Pointer>(p()) >> 32);
+        54 => return int.view(u54.view<Pointer>(p()) >> 32);
+        55 => return int.view(u55.view<Pointer>(p()) >> 32);
+        56 => return int.view(u56.view<Pointer>(p()) >> 32);
+        57 => return int.view(u57.view<Pointer>(p()) >> 32);
+        58 => return int.view(u58.view<Pointer>(p()) >> 32);
+        59 => return int.view(u59.view<Pointer>(p()) >> 32);
+        60 => return int.view(u60.view<Pointer>(p()) >> 32);
+        61 => return int.view(u61.view<Pointer>(p()) >> 32);
+        62 => return int.view(u62.view<Pointer>(p()) >> 32);
+        63 => return int.view(u63.view<Pointer>(p()) >> 32);
+        64 => return int.view(u64.view<Pointer>(p()) >> 32);
         _ => return 42;
     }
     
