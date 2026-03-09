@@ -897,7 +897,10 @@ class MachLowering(mach: MachProgram, compiler: Compiler, config: MachLoweringCo
 		def intPtrType = Int.getType(true, ft.width);
 		vals[0] = curBlock.opIntView(intPtrType, IntType.!(ttn.sub[0]), i_intPtr);
 		// Case 1.) normalized tt is 1 sub type 
-		if (ttn.sub.length == 1) return map1(i_old, vals[0]);
+		if (ttn.sub.length == 1) {
+			Terminal.put2("[MachLowering.genIntViewP] pointer type width: %d | 1 sub type only: %q\n", ft.width, ttn.sub[0].render);
+			return map1(i_old, vals[0]);
+		}
 		// Case 2.) normalized tt is multiple sub types
 		def extend = extendBigEnd(i_intPtr, intPtrType, intPtrType.signed);
 		for (i = 1; i < ttn.sub.length; i++) {
