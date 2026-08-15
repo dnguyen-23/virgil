@@ -1,0 +1,234 @@
+/**
+  Defines a partial evaluator where given a set of inputs, 
+  the partial evaluator will evaluate as much of the program 
+  as it can. The partial evaluator should output a specialized 
+  version of the program. 
+
+  Task 1.) Define the mechanism for traversing the SSA CFG
+  Task 2.) Track subcontexts for each block 
+  Task 3.) Use a naiive method for context identification
+  Task 4.) Traverse an SSA CFG with if-statements and check 
+  	that contexts are properly assigned to each block
+  Task 5.) Traverse an SSA CFG with nested if-statements
+  	Define a representation for nested contexts
+  Task 6.) Traverse an SSA CFG with numerical loops and 
+  	make sure blocks are assigned the correct 
+  Task 7.) Track optimization info in the contexts for each block
+  Task 8.) Merge the optimization information
+  Task 9.) Propagate the optimization information to nested 
+  	contexts
+  Task 10.) Optimization information for loops
+  Task 11.) Optimize our context identification
+  */
+class PartialEvaluator {
+	// ----------------- Constants -----------------
+	def DEBUG = true;
+	// ----------------- Helpers -----------------
+	def blockOrder: SsaBlockOrder;
+	def instrReducer: SsaInstrReducer;
+	def blockToContexts = HashMap<SsaBlock, PEBlockContext>.new(SsaBlock.uid, SsaBlock.==);
+	// Stores the control structures the evaluation is currently nested under
+	// This mechanism helps determine what values we can assume as constant
+	var contextStack: List<PEContextType> = null; 
+	new (blockOrder, instrReducer) {
+		blockOrder.computeDominators();
+	}
+
+	def evaluate() { 
+		def ordering: Vector<SsaBlock> = blockOrder.order;
+		if (ordering.length == 0) return;
+		var srpoIdx = 0;
+		blockToContexts[ordering[0]] = PEBlockContext.new(Vector<Val>.new());
+		while (srpoIdx < ordering.length) {
+			def block = ordering[srpoIdx];
+			if (DEBUG) Terminal.put1("Eval block uid: %d\n", block.uid);
+			if (DEBUG) Terminal.put1("Context:\n%q\n", renderContextStack);
+			srpoIdx = evalSsaBlock(block);
+		}
+	}
+	
+	/**
+	 * Returns the next SRPO index to resume partial evaluation at after 
+	 * partially evaluating a block.
+	 */
+	def evalSsaBlock(block: SsaBlock) -> int {
+		if (block == null) return 1;
+		for (instr = block.next; instr != block; instr = instr.next) {
+			match (instr) {
+				x: SsaApplyOp => {} // Call on the SsaInstrReducer 
+				x: SsaPhi => {}
+				x: SsaEnd => return evalSsaEnd(x); // loop increments srpoIdx
+			}
+		}
+		if (DEBUG) Terminal.put1("SsaBlock uid %d missing SsaEnd\n", block.uid);
+		return block.info.srpo_num + 1;
+	}
+
+	// Returns the SRPO index to resume partial evaluation at 
+	def evalSsaEnd(end: SsaEnd) -> int {
+		// Partial evaluator is called after switches have been lowered to if statements
+		match (end) {
+			x: SsaReturn, 
+			x: SsaThrow => return end.block().info.srpo_num + 1; // TODO: how do we know when to end
+			x: SsaIf => {
+				if (DEBUG) Terminal.put1("SsaIf uid: %d\n", x.uid);
+				/**
+				 * Init the contexts of the branches that will be traversed
+				 */
+				contextStack = List.new(PEContextType.IfBranch(x), contextStack);
+				def block = x.block();
+				def curContext = blockToContexts[block];
+				def condInstr: SsaInstr = x.input0();
+				if (SsaConst.?(condInstr)) {
+					/**
+					 * Only define the context for the start block of branch 
+					 *	that will be traversed
+					 */
+					def condConst = SsaConst.!(condInstr);
+					def isTrue = condConst.val == Bool.TRUE;
+					if (DEBUG) Terminal.put2("\tCondition is const | uid: %d | val: %z\n", x.uid, isTrue);
+					def branchBlock = if(isTrue, x.trueBlock(), x.falseBlock());
+					def newContextIds = curContext.copyIds().put(condConst.val);
+					blockToContexts[branchBlock] = PEBlockContext.new(newContextIds);
+					return branchBlock.info.srpo_num;
+				} 
+				// Define contexts for both branches
+				if (DEBUG) Terminal.put1("\tCondition is variable | uid: %d\n", x.uid);
+				def falseIds: Vector<Val> = curContext.copyIds().put(Bool.FALSE);
+				blockToContexts[x.falseBlock()] = PEBlockContext.new(falseIds);
+				def trueIds: Vector<Val> = curContext.copyIds().put(Bool.TRUE);
+				blockToContexts[x.trueBlock()] = PEBlockContext.new(trueIds);
+				return x.trueBlock().info.srpo_num;
+			}
+			x: SsaGoto => {
+				if (DEBUG) Terminal.put1("SsaGoto uid: %d\n", x.uid);
+				def curBlock = x.block();
+				def curBlockContext = blockToContexts[curBlock];
+				if (contextStack == null) {
+					def target = x.target();
+					blockToContexts[target] = PEBlockContext.new(curBlockContext.copyIds());
+					return target.info.srpo_num;
+				}
+				def curContextType = contextStack.head;
+				match (curContextType) {
+					IfBranch => {
+						def ifContextType = PEContextType.IfBranch.!(curContextType);
+						def trueBlock = ifContextType.ifInstr.trueBlock();
+						def falseBlock = ifContextType.ifInstr.falseBlock();
+						if (!ifContextType.isCondInstrConst()) {
+							/**
+							 * Follow the SRPO
+							 * Case condition is true: partially evaluate the false branch
+							 * 	False branch is next in the SRPO anyway
+							 * Case condition is false: merge block is next in SRPO anyway.
+							 * 
+							 * Block context already defined for if-statement branch start blocks
+							 */
+							return curBlock.info.srpo_num + 1;
+						} else {
+							/**
+							 * If condition constant, then after evaluating the branch
+							 * 	continue evaluating at the target block
+							 */
+							def condConst = SsaConst.!(ifContextType.ifInstr.input0());
+							contextStack = contextStack.tail;
+							blockToContexts[x.target()] = PEBlockContext.new(curBlockContext.copyIds());
+							return x.target().info.srpo_num;
+						}
+
+					}
+					_ => {
+						Terminal.put("unexpected context type encountered\n");
+						return 42;
+					}
+				}
+
+				// -------------------- Some merge functionality  ----------------------
+				// def target = x.target();
+				// def block = x.block();
+				// def isLastPred = target.preds[target.preds.length - 1].src == block;
+				// if (target.preds.length > 1 && isLastPred) {
+				// 	def targetContext = PEBlockContext(Vector<Val>.new());
+				// 	if (DEBUG) Terminal.put2("\tTraversed last pred block: %d of target block: %d", block.uid, target.uid);
+				// 	def pred0 = target.preds[0].src;
+				// 	def pred0Context = getMostRecentBlockContext(pred0);
+				// 	// Identify which identifiers/assumptions are common amongst all predecessors
+				// 	for (idIdx = 0; idIdx < pred0Context.ids.length; idIdx++) {
+				// 		def isIdentifierConstant = true;
+				// 		for (i = 1; i < target.preds.length; i++) {
+				// 			def pred = target.preds[i].src;
+				// 			// Assuming that the most recently accessed context is the last context in the vector
+				// 			// We should have an index to indicate the most recently accessed context
+				// 			def predContext = getMostRecentBlockContext(pred);
+				// 			if (predContext.ids[idIdx] != pred0.ids[idIdx]) {
+				// 				isIdentifierConstant = false;
+				// 				break;
+				// 			}
+				// 		}
+				// 		if (isIdentifierConstant) targetContext.ids.put(pred0.ids[idIdx]);
+				// 	}
+				// 	blockToContext[target.uid] = (Vectors.of1<PEBlockContext>(targetContext), 0);
+
+				// } else if (isLastPred) {
+				// 	def curContext = getMostRecentBlockContext(block);
+				// 	def targetContext = PEBlockContext(Vectors.ofN<Val>(curContext.ids.copy()));
+				// 	blockToContexts[target.uid] = (Vectors.of1<PEBlockContext>(targetContext), 0);
+				// }
+
+			}
+			_ => return 0;
+		}
+	}
+	// Returns the most recently accessed context for a block. Returns null if no context exists
+	// def getMostRecentBlockContext(block: SsaBlock) -> PEBlockContext {
+	// 	if (!blockToContexts.has(block)) return null;
+	// 	def contextInfo: (Vector<PEBlockContext>, int) = blockToContexts[block];
+	// 	def allContexts = contextInfo.0;
+	// 	def mostRecentContextIdx = contextInfo.1;
+	// 	return allContexts[mostRecentPredContextIdx];
+	// }
+
+	def renderContextStack(buf: StringBuilder) -> StringBuilder {
+		def v = Vector<PEContextType>.new();
+		for (l = contextStack; l != null; l = l.tail) v.put(l.head);
+		for (i < v.length) {
+			buf.put1("%q", v[i].render);
+			if (i != (v.length - 1)) buf.puts(" | ");
+		}
+		return buf;
+	}		
+
+}
+
+// PE stands for "Partial Evaluation"
+class PEBlockContext {
+	def ids: Vector<Val>;
+	new(ids) {}
+	// TODO: have a tree track the branching of IDs so we don't have to copy so much? 
+	// Similar to functional programming memory model
+	def copyIds() -> Vector<Val> {
+		return Vectors.ofN<Val>(ids.copy());
+	}
+}
+
+type PEContextType {
+	case IfBranch(ifInstr: SsaIf) {
+		def isCondInstrConst() -> bool { return SsaConst.?(ifInstr.input0()); }
+		def render(buf: StringBuilder) -> StringBuilder {
+			buf.put3(
+				"IfBranch(if uid: %d, const: %z, block uid: %d", 
+				ifInstr.uid, 
+				isCondInstrConst(), 
+				ifInstr.block().uid
+			);
+			return buf;
+		}
+	}
+	case IthLoopIteration(i: int, startBlock: SsaBlock) {
+		def render(buf: StringBuilder) -> StringBuilder {
+			buf.put2("IthLoopIteration(i: %d, block uid: %d", i, startBlock.uid);
+			return buf;
+		}
+	}
+	def render(buf: StringBuilder) -> StringBuilder { return buf; }
+}

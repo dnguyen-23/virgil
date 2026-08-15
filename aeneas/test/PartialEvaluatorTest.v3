@@ -1,0 +1,72 @@
+def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
+
+def X = [
+    T("simple", testSimple),
+    ()
+];
+
+
+class MockedPartialEvaluator extends PartialEvaluator {
+	new(blockOrder: SsaBlockOrder, instrReducer: SsaInstrReducer) super(blockOrder, instrReducer) {}
+	def evaluate() { 
+		def ordering: Vector<SsaBlock> = blockOrder.order;
+		var srpoIdx = 0;
+		while (srpoIdx < ordering.length) {
+			def block = ordering[srpoIdx];
+			Terminal.put1("srpoIdx: %d\n", srpoIdx);
+			srpoIdx = evalSsaBlock(block);
+		}
+	}
+}
+
+// Easy input format for creating tests
+type CFGSpec {
+	case If(cond: SsaInstr, trueBranch: CFGSpec, falseBranch: CFGSpec);
+	case Loop(numIter: SsaInstr, body: CFGSpec);
+	case Block(block: SsaBlock);
+}
+
+/**
+ * Defines funtionality for testing the partial evaluator
+ */
+class PartialEvaluatorTester(t: Tester) {
+	var partialEvaluator: MockedPartialEvaluator;
+	// Returns the start block and the end block of the CFG constructed
+	def cfgSpecToGraph(numIntParams: int, numBoolParams: int, spec: CFGSpec) {
+		def params = Array<SsaParam>.new(numIntParams + numBoolParams);
+		for (i < numIntParams) params[i] = SsaParam.new(i, Int.TYPE);
+		for (i = numIntParams; i < numIntParams + numBoolParams; i++) {
+			params[i] = SsaParam.new(i, Bool.TYPE);
+		}
+	}
+	def cfgSpecToGraph0(spec: CFGSpec) -> (SsaBlock, SsaBlock) {
+		// bruh just use the ssabuilder
+		match (spec) {
+			If => {
+				def ifSpec = CFGSpec.If.!(spec);
+				def start = SsaBlock.new();
+				def cfgTrue: (SsaBlock, SsaBlock) = cfgSpecToGraph(ifSpec.trueBranch);
+				def cfgFalse: (SsaBlock, SsaBlock) = cfgSpecToGraph(ifSpec.falseBranch);
+				start.append(SsaIf.new(ifSpec.cond, cfgTrue.0, cfgFalse.0));
+				def merge = SsaBlock.new();
+				merge.addPred(SsaCfEdge.new(cfgTrue.1, merge))
+				merge.addPred(SsaCfEdge.new(cfgFalse.1, merge))
+				return (start, merge);
+			Loop => {
+				// Loops have a preheader along with a header that contains the loop guard	
+				def start = SsaBlock.new();
+				def header = SsaBlock.new();
+				header.append(SsaPhi.new(Int.TYPE, header, [));
+				start.append(SsaGoto.new(header));
+				header.append
+			}
+			Block => {
+				def b = CFGSpec.Block.!(spec);
+				return (b.block, b.block);
+
+	}	
+	def usePE(pe: MockedPartialEvaluator) { partialEvaluator = pe; }
+}
+
+def testSimple(t: PartialEvaluatorTester) {
+}

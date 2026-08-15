@@ -1,0 +1,12 @@
+//@execute 0=0
+def main(a: int) -> int {
+	if (a % 2 == 0) {
+		if (a % 4 == 0) {
+			return a;
+		} else {
+			return 0;
+		}
+	} else {
+		return -1;
+	}
+}

@@ -414,6 +414,8 @@ class Compilation(compiler: Compiler, prog: Program) {
 			}
 			if (compiler.VstControlOpt && graph.isMultiBlock()) {
 				// Perform control flow optimizations.
+				def pe = PartialEvaluator.new(SsaBlockOrder.new(context.graph, false, SsaExternalMarker.new()), SsaInstrReducer.new(context));
+				pe.evaluate();
 				SsaCfOptimizer.new(context).optimize();
 				context.printSsa("Control Optimized");
 			}

@@ -1,0 +1,13 @@
+//@execute 0=0
+def main(a: int) -> int {
+	var result = 0;
+	for (i < a) {
+		if (i % 2 == 0) {
+			result += 0;
+		} else {
+			result += 2;
+		}
+	}
+	return result;
+}
+
