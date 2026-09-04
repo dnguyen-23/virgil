@@ -26,6 +26,15 @@ class PartialEvaluator {
 		while (worklist != null) evalSsaBlock();
 	}
 	
+	def copyMap<K, V>(oldMap: HashMap<K, V>) -> HashMap<K, V> {
+		def keyList = Maps.keyList<K, V>(oldMap);
+		def newMap = HashMap<K, V>.new(oldMap.hash, oldMap.equals);
+		for (l = keyList; l != null; l = l.tail) {
+			def key = l.head;
+			newMap[key] = oldMap[key];
+		}
+		return newMap;
+	}
 	
 	/**
 	 * Evaluate the next block in the worklist. 

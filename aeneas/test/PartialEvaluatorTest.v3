@@ -17,7 +17,7 @@ def X = [
 
 
 class MockedPartialEvaluator extends PartialEvaluator {
-	var expectedPath: List<bool>;
+	var expectedPath: List<PathType>;
 	var failed = false;
 	def assertHelpers: AssertHelpers;
 	var t: Tester;
@@ -36,12 +36,12 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		}
 	}
 
-	def popFromExpectedPath() -> bool {
+	def popFromExpectedPath() -> PathType {
 		if (expectedPath == null) {
 			t.fail("Unexpected branch exploration\n");
-			return false;
+			return PathType.IfBranch(false);
 		}
-		def expectedChoice: bool = expectedPath.head;
+		def expectedChoice: PathType = expectedPath.head;
 		expectedPath = expectedPath.tail;
 		return expectedChoice;
 	}
@@ -63,17 +63,23 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		}
 		if (!SsaIf.?(predEnd)) return;
 		def ifInstr = SsaIf.!(pred.end());
-		def curBranch = ifInstr.trueBlock() == curBlock;
-		if (expectedPath == null) {
-			def msg = Strings.format2("Unexpected branching encountered. SsaInstr uid: %d in block %d.\n", ifInstr.uid, pred.uid);
-			t.fail(msg);
+		def expected: PathType = popFromExpectedPath();	
+		match (expected) {
+			IfBranch => {
+				def ifPath = PathType.IfBranch.!(expected);
+				def expectedBranch = ifPath.branch;
+				def curBranch = ifInstr.trueBlock() == curBlock;
+				if (expectedBranch != curBranch) {
+					def msg = Strings.format2("Expected traversal of %z branch but %z branch was explored instead.\n", expectedBranch, curBranch);
+					t.fail(msg);
+				}
+			}
+			ForILoop => {
+				def msg = "Unimplemented.\n";
+				t.fail(msg);
+			}
 		}
-		def expected = expectedPath.head;
-		if (expected != curBranch) {
-			def msg = Strings.format2("Expected traversal of %z branch but %z branch was explored instead.\n", expected, curBranch);
-			t.fail(msg);
-		}
-		expectedPath = expectedPath.tail;
+
 	}
 }
 
@@ -91,11 +97,16 @@ type CFGSpecsToGraphOutput(
 	backedgesToHeader: HashMap<SsaGoto, SsaBlock>
 ) {}
 
+type PathType {
+	case IfBranch(branch: bool);
+	case ForILoop(i: int);
+}
+
 // Objects that help with the assertion we need to make
 type AssertHelpers(
 	t: Tester, 
 	backedgesToHeader: HashMap<SsaGoto, SsaBlock>,
-	expectedPath: List<bool>
+	expectedPath: List<PathType>
 ) {
 	def isBackedge(goto: SsaGoto) -> bool {
 		return backedgesToHeader.has(goto);
@@ -239,7 +250,7 @@ class PartialEvaluatorTester(t: Tester) {
 		}
 
 	}	
-	def assertCorrectTraversal(cfgSpecs: Array<CFGSpec>, params: Array<SsaParam>, expectedPathArr: Array<bool>) {
+	def assertCorrectTraversal(cfgSpecs: Array<CFGSpec>, params: Array<SsaParam>, expectedPathArr: Array<PathType>) {
 		def expectedPath = Lists.fromArray(expectedPathArr);
 
 		// Generate the graph
@@ -339,7 +350,8 @@ def testStraightLineConst(t: PartialEvaluatorTester) {
 		[]
 	);
 }
-
+def TRUE = PathType.IfBranch(true);
+def FALSE = PathType.IfBranch(false);
 def testSingleTrueConst(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(
 		[
@@ -351,7 +363,7 @@ def testSingleTrueConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[true]
+		[TRUE]
 	);
 }
 
@@ -366,7 +378,7 @@ def testSingleFalseConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[false]
+		[FALSE]
 	);
 }
 
@@ -386,7 +398,7 @@ def testSeriesFalseTrueConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[false, true]
+		[FALSE, TRUE]
 	);
 }
 
@@ -406,7 +418,7 @@ def testSeriesTrueFalseConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[true, false]
+		[TRUE, FALSE]
 	);
 }
 
@@ -431,7 +443,7 @@ def testSeriesTrueFalseTrueConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[true, false]
+		[TRUE, FALSE]
 	);
 }
 
@@ -454,7 +466,7 @@ def testNestingTrueFalseConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[true, false]
+		[TRUE, FALSE]
 	);
 }
 
@@ -477,7 +489,7 @@ def testNestingFalseTrueConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[false, true]
+		[FALSE, TRUE]
 	);
 }
 
@@ -513,7 +525,7 @@ def testTripleNestingWithWrongFourthBranchConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[true, false, true]
+		[TRUE, FALSE, TRUE]
 	);
 }
 
@@ -528,7 +540,7 @@ def testSingleVar(t: PartialEvaluatorTester) {
 			)
 		],
 		prms.toArray(),
-		[true, false]
+		[TRUE, FALSE]
 	);
 }
 
@@ -552,11 +564,11 @@ def testNestingVariableIfStmtInTrueBranchAndTrueConstIfStmtInFalseBranchUnderVar
 		],
 		prms.toArray(),
 		[
-			true, // outer true branch
-				true, // nested true branch
-				false, // nested false branch
-			false, // outer false branch
-				true // nested true branch
+			TRUE, // outer true branch
+				TRUE, // nested true branch
+				FALSE, // nested false branch
+			FALSE, // outer false branch
+				TRUE // nested true branch
 		]
 	);
 }
