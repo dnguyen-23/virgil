@@ -1,35 +1,20 @@
-/**
-  Defines a partial evaluator where given a set of inputs, 
-  the partial evaluator will evaluate as much of the program 
-  as it can. The partial evaluator should output a specialized 
-  version of the program. 
+// Copyright 2026 Virgil authors. All rights reserved.
+// See LICENSE for details of Apache 2.0 license.
 
-  Task 1.) Define the mechanism for traversing the SSA CFG
-  Task 2.) Track subcontexts for each block 
-  Task 3.) Use a naiive method for context identification
-  Task 4.) Traverse an SSA CFG with if-statements and check 
-  	that contexts are properly assigned to each block
-  Task 5.) Traverse an SSA CFG with nested if-statements
-  	Define a representation for nested contexts
-  Task 6.) Traverse an SSA CFG with numerical loops and 
-  	make sure blocks are assigned the correct 
-  Task 7.) Track optimization info in the contexts for each block
-  Task 8.) Merge the optimization information
-  Task 9.) Propagate the optimization information to nested 
-  	contexts
-  Task 10.) Optimization information for loops
-  Task 11.) Optimize our context identification
-  */
+/**
+ * Defines a partial evaluator where given a set of inputs, 
+ * the partial evaluator will evaluate as much of the program 
+ * as it can. The partial evaluator should output a specialized 
+ * version of the program. 
+ */
 class PartialEvaluator {
 	// ----------------- Constants -----------------
 	def DEBUG = true;
 	// ----------------- Helpers -----------------
 	def blockOrder: SsaBlockOrder;
 	def instrReducer: SsaInstrReducer;
-	def blockToContexts = HashMap<SsaBlock, PEBlockContext>.new(SsaBlock.uid, SsaBlock.==);
-	// Stores the control structures the evaluation is currently nested under
-	// This mechanism helps determine what values we can assume as constant
-	var contextStack: List<PEContextType> = null; 
+	var worklist: List<SsaBlock>;
+	def blockContextsMap = HashMap<SsaBlock, List<PEBlockContext>>.new(SsaBlock.uid, SsaBlock.==);
 	new (blockOrder, instrReducer) {
 		blockOrder.computeDominators();
 	}
@@ -37,198 +22,211 @@ class PartialEvaluator {
 	def evaluate() { 
 		def ordering: Vector<SsaBlock> = blockOrder.order;
 		if (ordering.length == 0) return;
-		var srpoIdx = 0;
-		blockToContexts[ordering[0]] = PEBlockContext.new(Vector<Val>.new());
-		while (srpoIdx < ordering.length) {
-			def block = ordering[srpoIdx];
-			if (DEBUG) Terminal.put1("Eval block uid: %d\n", block.uid);
-			if (DEBUG) Terminal.put1("Context:\n%q\n", renderContextStack);
-			srpoIdx = evalSsaBlock(block);
-		}
+		worklist = Lists.cons1<SsaBlock>(ordering[0]);
+		while (worklist != null) evalSsaBlock();
 	}
 	
+	
 	/**
-	 * Returns the next SRPO index to resume partial evaluation at after 
-	 * partially evaluating a block.
+	 * Evaluate the next block in the worklist. 
 	 */
-	def evalSsaBlock(block: SsaBlock) -> int {
-		if (block == null) return 1;
+	def evalSsaBlock() {
+		if (worklist == null) return;
+		def block: SsaBlock = worklist.head;
+		// TODO: identifiers for reusing contexts
+		def blockContext = PEBlockContext.new();
+		worklist = worklist.tail;
+		if (DEBUG) Terminal.put1("Eval block uid: %d\n", block.uid);
 		for (instr = block.next; instr != block; instr = instr.next) {
 			match (instr) {
-				x: SsaApplyOp => {} // Call on the SsaInstrReducer 
+				x: SsaApplyOp => {
+					// Reconstruct instruction (to avoid modifying original)
+					blockContext.addInstr(x, instrReducer, blockContext);
+				   } // Call on the SsaInstrReducer 
 				x: SsaPhi => {}
-				x: SsaEnd => return evalSsaEnd(x); // loop increments srpoIdx
+				x: SsaEnd => return evalSsaEnd(x, blockContext); 
 			}
 		}
 		if (DEBUG) Terminal.put1("SsaBlock uid %d missing SsaEnd\n", block.uid);
-		return block.info.srpo_num + 1;
+		return;
 	}
-
 	// Returns the SRPO index to resume partial evaluation at 
-	def evalSsaEnd(end: SsaEnd) -> int {
+	def evalSsaEnd(end: SsaEnd, blockContext: PEBlockContext) {
 		// Partial evaluator is called after switches have been lowered to if statements
 		match (end) {
 			x: SsaReturn, 
-			x: SsaThrow => return end.block().info.srpo_num + 1; // TODO: how do we know when to end
+			x: SsaThrow => return; // TODO: how do we know when to end
 			x: SsaIf => {
 				if (DEBUG) Terminal.put1("SsaIf uid: %d\n", x.uid);
-				/**
-				 * Init the contexts of the branches that will be traversed
-				 */
-				contextStack = List.new(PEContextType.IfBranch(x), contextStack);
-				def block = x.block();
-				def curContext = blockToContexts[block];
-				def condInstr: SsaInstr = x.input0();
+				// Case on whether the condition is variable or constant
+				var condInstr = x.input0();
+				if(SsaApplyOp.?(x.input0())) {
+					condInstr = blockContext.getOptInstr(SsaApplyOp.!(condInstr), blockContext);
+				}
+
 				if (SsaConst.?(condInstr)) {
-					/**
-					 * Only define the context for the start block of branch 
-					 *	that will be traversed
-					 */
-					def condConst = SsaConst.!(condInstr);
-					def isTrue = condConst.val == Bool.TRUE;
-					if (DEBUG) Terminal.put2("\tCondition is const | uid: %d | val: %z\n", x.uid, isTrue);
-					def branchBlock = if(isTrue, x.trueBlock(), x.falseBlock());
-					def newContextIds = curContext.copyIds().put(condConst.val);
-					blockToContexts[branchBlock] = PEBlockContext.new(newContextIds);
-					return branchBlock.info.srpo_num;
+					def constCond = SsaConst.!(condInstr);
+					def rawCond = Bool.unbox(constCond.val);
+					def nextBlock = if(rawCond, x.trueBlock(), x.falseBlock());
+					if (DEBUG) Terminal.put1("\tConstant condition: %z\n", rawCond);
+					worklist = List<SsaBlock>.new(nextBlock, worklist);
+					return;
 				} 
-				// Define contexts for both branches
-				if (DEBUG) Terminal.put1("\tCondition is variable | uid: %d\n", x.uid);
-				def falseIds: Vector<Val> = curContext.copyIds().put(Bool.FALSE);
-				blockToContexts[x.falseBlock()] = PEBlockContext.new(falseIds);
-				def trueIds: Vector<Val> = curContext.copyIds().put(Bool.TRUE);
-				blockToContexts[x.trueBlock()] = PEBlockContext.new(trueIds);
-				return x.trueBlock().info.srpo_num;
+
+				// Eval true block first because it comes first in the SRPO
+				if (DEBUG) Terminal.put2("\tVar condition | trueBlock: %d | falseBlock: %d\n", x.trueBlock().uid, x.falseBlock().uid);
+				worklist = List<SsaBlock>.new(x.falseBlock(), worklist);
+				worklist = List<SsaBlock>.new(x.trueBlock(), worklist);
+				return;
 			}
-			x: SsaGoto => {
+			x: SsaGoto => { 
 				if (DEBUG) Terminal.put1("SsaGoto uid: %d\n", x.uid);
-				def curBlock = x.block();
-				def curBlockContext = blockToContexts[curBlock];
-				if (contextStack == null) {
-					def target = x.target();
-					blockToContexts[target] = PEBlockContext.new(curBlockContext.copyIds());
-					return target.info.srpo_num;
+				def target = x.target();
+				if (target.preds.length == 1) {
+					if (DEBUG) Terminal.put1("\tGoto target %d has 1 predecessor.\n", target.uid);
+					worklist = List<SsaBlock>.new(target, worklist);
+					return;
 				}
-				def curContextType = contextStack.head;
-				match (curContextType) {
-					IfBranch => {
-						def ifContextType = PEContextType.IfBranch.!(curContextType);
-						def trueBlock = ifContextType.ifInstr.trueBlock();
-						def falseBlock = ifContextType.ifInstr.falseBlock();
-						if (!ifContextType.isCondInstrConst()) {
-							/**
-							 * Follow the SRPO
-							 * Case condition is true: partially evaluate the false branch
-							 * 	False branch is next in the SRPO anyway
-							 * Case condition is false: merge block is next in SRPO anyway.
-							 * 
-							 * Block context already defined for if-statement branch start blocks
-							 */
-							return curBlock.info.srpo_num + 1;
-						} else {
-							/**
-							 * If condition constant, then after evaluating the branch
-							 * 	continue evaluating at the target block
-							 */
-							def condConst = SsaConst.!(ifContextType.ifInstr.input0());
-							contextStack = contextStack.tail;
-							blockToContexts[x.target()] = PEBlockContext.new(curBlockContext.copyIds());
-							return x.target().info.srpo_num;
-						}
+				/**
+				 * Goto target is a merge block with 2 predecessors
+				 * Branching must have happened earlier in the CFG
+				 * 
+				 * Case 1.) True branch targeting merge block; 
+				 * 	original condition was variable
+				 * Case 2.) True branch targeting merge block;
+				 * 	original condition was constant through PE info
+				 * Case 3.) False branch targeting merge block
+				 */
+				def curSrpoNum = x.block().info.srpo_num;
 
-					}
-					_ => {
-						Terminal.put("unexpected context type encountered\n");
-						return 42;
-					}
-				}
-
-				// -------------------- Some merge functionality  ----------------------
-				// def target = x.target();
-				// def block = x.block();
-				// def isLastPred = target.preds[target.preds.length - 1].src == block;
-				// if (target.preds.length > 1 && isLastPred) {
-				// 	def targetContext = PEBlockContext(Vector<Val>.new());
-				// 	if (DEBUG) Terminal.put2("\tTraversed last pred block: %d of target block: %d", block.uid, target.uid);
-				// 	def pred0 = target.preds[0].src;
-				// 	def pred0Context = getMostRecentBlockContext(pred0);
-				// 	// Identify which identifiers/assumptions are common amongst all predecessors
-				// 	for (idIdx = 0; idIdx < pred0Context.ids.length; idIdx++) {
-				// 		def isIdentifierConstant = true;
-				// 		for (i = 1; i < target.preds.length; i++) {
-				// 			def pred = target.preds[i].src;
-				// 			// Assuming that the most recently accessed context is the last context in the vector
-				// 			// We should have an index to indicate the most recently accessed context
-				// 			def predContext = getMostRecentBlockContext(pred);
-				// 			if (predContext.ids[idIdx] != pred0.ids[idIdx]) {
-				// 				isIdentifierConstant = false;
-				// 				break;
-				// 			}
-				// 		}
-				// 		if (isIdentifierConstant) targetContext.ids.put(pred0.ids[idIdx]);
-				// 	}
-				// 	blockToContext[target.uid] = (Vectors.of1<PEBlockContext>(targetContext), 0);
-
-				// } else if (isLastPred) {
-				// 	def curContext = getMostRecentBlockContext(block);
-				// 	def targetContext = PEBlockContext(Vectors.ofN<Val>(curContext.ids.copy()));
-				// 	blockToContexts[target.uid] = (Vectors.of1<PEBlockContext>(targetContext), 0);
-				// }
-
+				/**
+				 * Merge block always comes after last block in false branch.
+				 * Our convention explores true branch, false branch, then merge block.
+				 */
+				def targetIsNextInSRPO = target.info.srpo_num == curSrpoNum + 1;
+				/**
+				 * False branch start block always comes after last block in 
+				 * true branch because SRPO requires exploring blocks in both branches 
+				 * before exploring the merge block.
+				 *
+				 * At SsaIf, adding the false branch start block means we intend to explore it.
+				 */
+				def falseBranchIgnored = worklist != null && (worklist.head.info.srpo_num != x.block().info.srpo_num + 1);
+				if (targetIsNextInSRPO || falseBranchIgnored) {
+					// Case 2.) and 3.) 
+					worklist = List<SsaBlock>.new(target, worklist);
+				} 
+				// Case 1.) is noop; follow the worklist
+				return;
 			}
-			_ => return 0;
+			_ => return;
 		}
 	}
-	// Returns the most recently accessed context for a block. Returns null if no context exists
-	// def getMostRecentBlockContext(block: SsaBlock) -> PEBlockContext {
-	// 	if (!blockToContexts.has(block)) return null;
-	// 	def contextInfo: (Vector<PEBlockContext>, int) = blockToContexts[block];
-	// 	def allContexts = contextInfo.0;
-	// 	def mostRecentContextIdx = contextInfo.1;
-	// 	return allContexts[mostRecentPredContextIdx];
-	// }
+}
 
-	def renderContextStack(buf: StringBuilder) -> StringBuilder {
-		def v = Vector<PEContextType>.new();
-		for (l = contextStack; l != null; l = l.tail) v.put(l.head);
-		for (i < v.length) {
-			buf.put1("%q", v[i].render);
-			if (i != (v.length - 1)) buf.puts(" | ");
+type OptMapKey(op: Operator, inputs: Array<SsaInstr>) {
+	/**
+	 * Implicitly takes as input an additional OptMapKey when called
+	 * off of the type identifier
+	 */
+	def hash() -> int {
+		var hashResult: int = op.opcode.tag;
+		for (i in inputs) hashResult = hashResult * 33 + i.uid;
+		return hashResult;
+	}
+
+	/**
+	 * Implicitly takes as input an OptMapKey additional when called
+	 * off of the type identifier
+	 */
+	def eq(other: OptMapKey) -> bool {
+		def operatorsMatch = other.op == op;
+		return (other.op == op) && Arrays.allTrue(inputs, other.inputs, SsaInstr.==);
+	}
+
+	def render(buf: StringBuilder) -> StringBuilder {
+		op.render(buf);
+		buf.puts(" | ");
+		for (i = 0; i < inputs.length; i++) {
+			def instr = inputs[i];
+			buf.put1("uid: %d", instr.uid);
+			if (i != (inputs.length - 1)) buf.puts(" | ");
 		}
 		return buf;
-	}		
-
+	}
 }
 
 // PE stands for "Partial Evaluation"
 class PEBlockContext {
-	def ids: Vector<Val>;
-	new(ids) {}
-	// TODO: have a tree track the branching of IDs so we don't have to copy so much? 
-	// Similar to functional programming memory model
-	def copyIds() -> Vector<Val> {
-		return Vectors.ofN<Val>(ids.copy());
+	/**
+	 * Why keep optimization info map for each context? 
+	 * Alternative: specialize the code
+	 * MVP: ensure traversal is correct
+	 * Afterward, it's possible we already have a specialization 
+	 * we want to continue using. Instead of overspecializing, 
+	 * it's possible we instead want to assume something is 
+	 * constant for evaluating but assume different things
+	 * are constant when specializing
+	 *
+	 * How do you use the map: replace all usages with the 
+	 * instruction we map to.
+	 */
+	def optMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.eq);
+	def applyOpToOptMapKey(applyOp: SsaApplyOp) -> OptMapKey {
+		def dfEdges = applyOp.inputs;
+		def args = Arrays.map(dfEdges, SsaDfEdge.dest);
+		return OptMapKey(applyOp.op, args);
+	}
+	/** 
+	 * Returns the instruction with the cached and optimized arguments
+	 */
+	def optimizeArgs(i: SsaApplyOp, blockContext: PEBlockContext) -> SsaApplyOp {
+		def dfToInstrWithContext: SsaDfEdge -> SsaInstr = dfEdgeToInstr(blockContext, _);
+		def newArgs: Array<SsaInstr> = Arrays.map(i.inputs, dfToInstrWithContext);
+		Terminal.put1("Optimized args for %d: ", i.uid);
+		for (a in newArgs) {
+			Terminal.put1("%d ", a.uid);
+		}
+		Terminal.put("\n");
+		// TODO: transfer facts
+		return SsaApplyOp.new(null, i.op, newArgs);
+	}
+	def addInstr(i: SsaApplyOp, instrReducer: SsaInstrReducer, blockContext: PEBlockContext) -> SsaInstr {
+		def copy = optimizeArgs(i, blockContext);
+		def key: OptMapKey = applyOpToOptMapKey(copy);
+		// Check if instr is already in map
+		if (optMap.has(key)) {
+			return optMap[key];
+		}
+		def reducedInstr = instrReducer.reduceApplyOp(copy);
+		Terminal.put3("Instr uid %d | %q -> reduced uid %d\n", i.uid, key.render, reducedInstr.uid);
+		optMap[key] = reducedInstr;
+		return reducedInstr;
+	}
+	/**
+	 * Mapping function over the list of dfEdges for an instruction.
+	 */
+	private def dfEdgeToInstr(blockContext: PEBlockContext, dfEdge: SsaDfEdge) -> SsaInstr {
+		if (!SsaApplyOp.?(dfEdge.dest)) return dfEdge.dest;
+		def applyOp = SsaApplyOp.!(dfEdge.dest);
+		if (!hasOptInstr(applyOp)) return dfEdge.dest;
+		return blockContext.getOptInstr(applyOp, blockContext);
+	}
+	def hasOptInstr(i: SsaApplyOp) -> bool {
+		def key = applyOpToOptMapKey(i);
+		return optMap.has(key);
+	}
+
+	def getOptInstr(i: SsaApplyOp, blockContext: PEBlockContext) -> SsaInstr {
+		def copy = optimizeArgs(i, blockContext);
+		def key = applyOpToOptMapKey(copy);
+		Terminal.put2("getOptInstr | instr uid: %d | key: %q\n", i.uid, key.render);
+		if (!optMap.has(key)) {
+			def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
+			System.error("PartialEvaluationFailedException", msg);
+			return null;
+		}
+		return optMap[key];
 	}
 }
 
-type PEContextType {
-	case IfBranch(ifInstr: SsaIf) {
-		def isCondInstrConst() -> bool { return SsaConst.?(ifInstr.input0()); }
-		def render(buf: StringBuilder) -> StringBuilder {
-			buf.put3(
-				"IfBranch(if uid: %d, const: %z, block uid: %d", 
-				ifInstr.uid, 
-				isCondInstrConst(), 
-				ifInstr.block().uid
-			);
-			return buf;
-		}
-	}
-	case IthLoopIteration(i: int, startBlock: SsaBlock) {
-		def render(buf: StringBuilder) -> StringBuilder {
-			buf.put2("IthLoopIteration(i: %d, block uid: %d", i, startBlock.uid);
-			return buf;
-		}
-	}
-	def render(buf: StringBuilder) -> StringBuilder { return buf; }
-}
