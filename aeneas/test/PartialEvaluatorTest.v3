@@ -54,11 +54,9 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		if (SsaGoto.?(predEnd)) {
 			// CFG always has direct goto to update block in loop
 			// TODO: what about for while loops?
-			def isCurEndBackedge = assertHelpers.isBackedge(SsaGoto.!(curBlock.end()));
-			if (!isCurEndBackedge) {
-				expectedPath = expectedPath.tail;
-				return;
-			}
+			def isLoopUpdateBlock = SsaGoto.?(curBlock.end()) && assertHelpers.isLoopHeader(SsaGoto.!(curBlock.end()).target());
+			if (!isLoopUpdateBlock) expectedPath = expectedPath.tail; 
+			return;
 			
 		}
 		if (!SsaIf.?(predEnd)) return;
@@ -94,7 +92,7 @@ type CFGSpec {
 // Outputs from generating the CFG from the spec that will be useful for testing
 type CFGSpecsToGraphOutput(
 	graph: SsaGraph, 
-	backedgesToHeader: HashMap<SsaGoto, SsaBlock>
+	headerToBackedge: HashMap<SsaBlock, SsaGoto>	
 ) {}
 
 type PathType {
@@ -105,11 +103,11 @@ type PathType {
 // Objects that help with the assertion we need to make
 type AssertHelpers(
 	t: Tester, 
-	backedgesToHeader: HashMap<SsaGoto, SsaBlock>,
+	headerToBackedge: HashMap<SsaBlock, SsaGoto>,
 	expectedPath: List<PathType>
 ) {
-	def isBackedge(goto: SsaGoto) -> bool {
-		return backedgesToHeader.has(goto);
+	def isLoopHeader(block: SsaBlock) -> bool {
+		return headerToBackedge.has(block);
 	}
 }
 
@@ -122,14 +120,14 @@ class PartialEvaluatorTester(t: Tester) {
 		def graph = SsaGraph.new(params, Int.TYPE);
 		def builder = SsaBuilder.new(null, graph, graph.startBlock);
 
-		// Backedges used for loop recognition during testing
-		def backedgesToHeader = HashMap<SsaGoto, SsaBlock>.new(SsaGoto.uid, SsaGoto.==);
+		// Loop Header used for loop recognition during testing
+		def headerToBackedge = HashMap<SsaBlock, SsaGoto>.new(SsaBlock.uid, SsaBlock.==);
 
-		def cfgSpecToGraphHelper = cfgSpecToGraph0(builder, backedgesToHeader, _);
+		def cfgSpecToGraphHelper = cfgSpecToGraph0(builder, headerToBackedge, _);
 		for (spec in specs) {
 			cfgSpecToGraphHelper(spec);
 		}
-		return CFGSpecsToGraphOutput(graph, backedgesToHeader);
+		return CFGSpecsToGraphOutput(graph, headerToBackedge);
 
 	}
 	def getUniqueConst(const: SsaConst, builder: SsaBuilder) -> SsaConst {
@@ -155,7 +153,7 @@ class PartialEvaluatorTester(t: Tester) {
 	}
 	def cfgSpecToGraph0(
 		builder: SsaBuilder, 
-		backedgesToHeader: HashMap<SsaGoto, SsaBlock>, 
+		headerToBackedge: HashMap<SsaBlock, SsaGoto>, 
 		spec: CFGSpec
 	) -> SsaBlock {
 		match (spec) {
@@ -167,12 +165,12 @@ class PartialEvaluatorTester(t: Tester) {
 
 				def trueBlock = SsaBlock.new();
 				builder.set(trueBlock);
-				cfgSpecToGraph0(builder, backedgesToHeader, ifSpec.trueBranch);
+				cfgSpecToGraph0(builder, headerToBackedge, ifSpec.trueBranch);
 				builder.addGoto(mergeBlock);
 
 				def falseBlock = SsaBlock.new();
 				builder.set(falseBlock);
-				def cfgFalse: SsaBlock = cfgSpecToGraph0(builder, backedgesToHeader, ifSpec.falseBranch);
+				def cfgFalse: SsaBlock = cfgSpecToGraph0(builder, headerToBackedge, ifSpec.falseBranch);
 				builder.addGoto(mergeBlock);
 
 				builder.set(header);
@@ -215,7 +213,7 @@ class PartialEvaluatorTester(t: Tester) {
 
 				// Generate the loop body
 				builder.set(bodyBlock);
-				cfgSpecToGraph0(builder, backedgesToHeader, loopSpec.body);
+				cfgSpecToGraph0(builder, headerToBackedge, loopSpec.body);
 				def updateBlock = SsaBlock.new();
 				builder.addGoto(updateBlock);
 
@@ -225,7 +223,7 @@ class PartialEvaluatorTester(t: Tester) {
 
 				// Add backedge to map for testing later
 				def backedge: SsaGoto = SsaGoto.!(updateBlock.end());
-				backedgesToHeader[backedge] = header;
+				headerToBackedge[header] = backedge;
 
 				// Replace the temp instruction with the increment instruction
 				temp.replace(updateInstr);
@@ -256,7 +254,7 @@ class PartialEvaluatorTester(t: Tester) {
 		// Generate the graph
 		def graphOutput: CFGSpecsToGraphOutput = cfgSpecsToGraph(cfgSpecs, params);
 		def graph = graphOutput.graph;
-		def backedgesToHeader = graphOutput.backedgesToHeader;
+		def headerToBackedge = graphOutput.headerToBackedge;
 
 		// TODO: Debug flag
 		SsaPrinter.new().printGraph(null, null, graph, null);
@@ -268,7 +266,7 @@ class PartialEvaluatorTester(t: Tester) {
 		// Generate the SsaBlockOrder
 		def blockOrder = SsaBlockOrder.new(graph, false, SsaInternalMarker.new());
 
-		def assertHelpers = AssertHelpers(t, backedgesToHeader, expectedPath);
+		def assertHelpers = AssertHelpers(t, headerToBackedge, expectedPath);
 
 		def pe = MockedPartialEvaluator.new(blockOrder, instrReducer, assertHelpers);
 		pe.evaluate();
