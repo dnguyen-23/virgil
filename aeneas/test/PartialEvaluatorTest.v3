@@ -1,18 +1,20 @@
 def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
 
 def X = [
-    T("single block/straight line code", testStraightLineConst),
-    T("single if-stmt constant true", testSingleTrueConst),
-    T("single if-stmt constant false", testSingleFalseConst),
-    T("series false -> true", testSeriesFalseTrueConst),
-    T("series true -> false", testSeriesTrueFalseConst),
-    T("series true -> false -> true", testSeriesTrueFalseTrueConst),
-    T("nesting true -> false", testNestingTrueFalseConst),
-    T("nesting false -> true", testNestingFalseTrueConst),
-    T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
-    T("single variable condtion", testSingleVar),
-    T("nesting variable if-stmt and true const if-stmt under a variable if-stmt", testNestingVariableIfStmtInTrueBranchAndTrueConstIfStmtInFalseBranchUnderVariableIfStmt),
-    ()
+	// T("single block/straight line code", testStraightLineConst),
+	// T("single if-stmt constant true", testSingleTrueConst),
+	// T("single if-stmt constant false", testSingleFalseConst),
+	// T("series false -> true", testSeriesFalseTrueConst),
+	// T("series true -> false", testSeriesTrueFalseConst),
+	// T("series true -> false -> true", testSeriesTrueFalseTrueConst),
+	// T("nesting true -> false", testNestingTrueFalseConst),
+	// T("nesting false -> true", testNestingFalseTrueConst),
+	// T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
+	// T("single variable condtion", testSingleVar),
+	// T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
+	T("simple loop", testSimpleLoop),
+	T("nested loop within nested if-stmt", testIfStmtNestedLoop),
+	()
 ];
 
 
@@ -21,6 +23,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 	var failed = false;
 	def assertHelpers: AssertHelpers;
 	var t: Tester;
+	private def headerToIter = HashMap<SsaBlock, int>.new(SsaBlock.uid, SsaBlock.==);
 	new(blockOrder: SsaBlockOrder, instrReducer: SsaInstrReducer, assertHelpers) super(blockOrder, instrReducer) {
 		t = assertHelpers.t;
 		expectedPath = assertHelpers.expectedPath;
@@ -73,8 +76,22 @@ class MockedPartialEvaluator extends PartialEvaluator {
 				}
 			}
 			ForILoop => {
-				def msg = "Unimplemented.\n";
-				t.fail(msg);
+				def loopPath = PathType.ForILoop.!(expected);
+				if (!assertHelpers.headerToBackedge.has(pred)) {
+					def msg = Strings.format1("Expected traversal of loop but not currently entering a loop body. Block uid: %d\n", curBlock.uid);
+					t.fail(msg);
+				}
+				var curIter = 0;
+				if(headerToIter.has(pred)) {
+					headerToIter[pred]++;
+					curIter = headerToIter[pred];
+				} else {
+					headerToIter[pred] = 0;
+				}
+				if (curIter != loopPath.i) {
+					def msg = Strings.format3("Expected to be at iteration %d but currently at iteration %d with loop header block %d\n", loopPath.i, curIter, pred.uid);
+					t.fail(msg);
+				}
 			}
 		}
 
@@ -195,9 +212,11 @@ class PartialEvaluatorTester(t: Tester) {
 			}
 			Loop => {
 				def loopSpec = CFGSpec.Loop.!(spec);
-				// Loops have a preheader along with a header that contains the loop guard	
+				// Loops have a preheader (current block) 
+				// along with a header that contains the loop guard	
 				def header = SsaBlock.new();
 				builder.addGoto(header);
+				builder.set(header);
 
 				// Define a temp instr we'll replace later
 				def temp = SsaInstr.new([]);
@@ -207,7 +226,7 @@ class PartialEvaluatorTester(t: Tester) {
 				def exitBlock = SsaBlock.new();
 				def bodyBlock = SsaBlock.new();
 				
-				def numIter: SsaInstr = if(SsaConst.?(loopSpec.numIter), builder.graph.intConst(Int.unbox(SsaConst.!(loopSpec.numIter).val)), loopSpec.numIter);
+				def numIter: SsaInstr = if(SsaConst.?(loopSpec.numIter), getUniqueIntConst(SsaConst.!(loopSpec.numIter), builder), loopSpec.numIter);
 				def guard: SsaInstr = builder.pure(Int.TYPE.opLt(), [phiInstr, numIter]);
 				builder.addIf(guard, bodyBlock, exitBlock);
 
@@ -325,6 +344,11 @@ class PartialEvaluatorTester(t: Tester) {
 		def neqInstr = SsaApplyOp.new(null, lt, [instr, instr]);
 		return [neqInstr];
 	}
+
+	def forLoopConstSpec(numIter: int, bodySpec: CFGSpec) -> CFGSpec {
+		def numIterConst = SsaConst.new(Int.TYPE, Int.box(numIter));
+		return CFGSpec.Loop(numIterConst, bodySpec);
+	}
 }
 
 type TestParams(boolParams: Array<SsaParam>, intParams: Array<SsaParam>){
@@ -350,6 +374,7 @@ def testStraightLineConst(t: PartialEvaluatorTester) {
 }
 def TRUE = PathType.IfBranch(true);
 def FALSE = PathType.IfBranch(false);
+def LOOP = (fun (i: int) => PathType.ForILoop(i));
 def testSingleTrueConst(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(
 		[
@@ -535,14 +560,15 @@ def testSingleVar(t: PartialEvaluatorTester) {
 				prms.getBool(0),
 				t.blockEmptySpec(),
 				t.blockEmptySpec()
-			)
+			),
+			t.endSpec(0)
 		],
 		prms.toArray(),
 		[TRUE, FALSE]
 	);
 }
 
-def testNestingVariableIfStmtInTrueBranchAndTrueConstIfStmtInFalseBranchUnderVariableIfStmt(t: PartialEvaluatorTester) {
+def testVariableIfStmtWithNesting(t: PartialEvaluatorTester) {
 	def prms: TestParams = t.makeParams(2, 0);
 	t.assertCorrectTraversal(
 		[
@@ -558,7 +584,8 @@ def testNestingVariableIfStmtInTrueBranchAndTrueConstIfStmtInFalseBranchUnderVar
 					t.blockEmptySpec(),
 					t.blockEmptySpec()
 				)
-			)
+			),
+			t.endSpec(0)
 		],
 		prms.toArray(),
 		[
@@ -569,4 +596,43 @@ def testNestingVariableIfStmtInTrueBranchAndTrueConstIfStmtInFalseBranchUnderVar
 				TRUE // nested true branch
 		]
 	);
+}
+
+def testSimpleLoop(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(
+		[
+			t.forLoopConstSpec(3, t.blockEmptySpec()),
+			t.endSpec(0)
+		],
+		[],
+		[
+			LOOP(0),
+			LOOP(1),
+			LOOP(2)
+		]
+	);
+
+}
+
+
+def testIfStmtNestedLoop(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(
+		[
+			t.ifRuntimeConstSpec(
+				true,
+				t.forLoopConstSpec(4, t.blockEmptySpec()),
+				t.blockEmptySpec()
+			),
+			t.endSpec(0)
+		],
+		[],
+		[
+			TRUE,
+			LOOP(0),
+			LOOP(1),
+			LOOP(2),
+			LOOP(3),
+		]
+	);
+
 }

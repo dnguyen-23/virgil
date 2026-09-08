@@ -320,6 +320,7 @@ class PEBlockContext {
 	}
 
 	def getOptInstr(i: SsaInstr) -> SsaInstr {
+		if (SsaConst.?(i)) return i;
 		var instr = i;
 		if (SsaApplyOp.?(i)) {
 			instr = optimizeArgs(SsaApplyOp.!(i));
