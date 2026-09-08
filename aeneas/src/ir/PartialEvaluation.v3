@@ -15,8 +15,19 @@ class PartialEvaluator {
 	def instrReducer: SsaInstrReducer;
 	var worklist: List<SsaBlock>;
 	def blockContextsMap = HashMap<SsaBlock, List<PEBlockContext>>.new(SsaBlock.uid, SsaBlock.==);
+	def headerToLoop = HashMap<SsaBlock, SsaLoopInfo>.new(SsaBlock.uid, SsaBlock.==);
 	new (blockOrder, instrReducer) {
+		// Construct SRPO 
 		blockOrder.computeDominators();
+		// Construct header to loop map for loop identification later
+		def allLoopInfo: Vector<SsaLoopInfo> = blockOrder.loops;
+		if (allLoopInfo != null) {
+			for (i = 0; i < allLoopInfo.length; i++) {
+				def loopInfo = allLoopInfo[i];
+				def header: SsaBlock = blockOrder.order[loopInfo.start];
+				headerToLoop[header] = loopInfo;
+			}
+		}
 	}
 
 	def evaluate() { 
@@ -25,15 +36,38 @@ class PartialEvaluator {
 		worklist = Lists.cons1<SsaBlock>(ordering[0]);
 		while (worklist != null) evalSsaBlock();
 	}
-	
-	def copyMap<K, V>(oldMap: HashMap<K, V>) -> HashMap<K, V> {
-		def keyList = Maps.keyList<K, V>(oldMap);
-		def newMap = HashMap<K, V>.new(oldMap.hash, oldMap.equals);
-		for (l = keyList; l != null; l = l.tail) {
-			def key = l.head;
-			newMap[key] = oldMap[key];
+
+	/**
+	 * Returns the most recent context created for a block
+	 */
+	def getLatestBlockContext(block: SsaBlock) -> PEBlockContext {
+		def contextList = blockContextsMap[block];
+		return if (contextList == null, null, contextList.head);
+	}
+
+	/**
+	 * Adds a new block context for the block
+	 */
+	def addNewBlockContext(block: SsaBlock, newContext: PEBlockContext) {
+		def oldContextList = blockContextsMap[block];
+		blockContextsMap[block] = List.new(newContext, oldContextList);
+	}
+
+	/**
+	 * Creates a block context for the block given information about it.
+	 */
+	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
+		if (block.preds.length != 1) {
+			def newContext = PEBlockContext.new(null);
+			addNewBlockContext(block, newContext);
+			return newContext;
 		}
-		return newMap;
+		def cfEdge: SsaCfEdge = block.preds[0];
+		def pred: SsaBlock = cfEdge.src.block();
+		def lastPredContext = getLatestBlockContext(pred);
+		def newContext = PEBlockContext.new(lastPredContext);
+		addNewBlockContext(block, newContext);
+		return newContext;
 	}
 	
 	/**
@@ -43,22 +77,44 @@ class PartialEvaluator {
 		if (worklist == null) return;
 		def block: SsaBlock = worklist.head;
 		// TODO: identifiers for reusing contexts
-		def blockContext = PEBlockContext.new();
+		def blockContext = createContextForBlock(block);
 		worklist = worklist.tail;
 		if (DEBUG) Terminal.put1("Eval block uid: %d\n", block.uid);
 		for (instr = block.next; instr != block; instr = instr.next) {
 			match (instr) {
 				x: SsaApplyOp => {
 					// Reconstruct instruction (to avoid modifying original)
-					blockContext.addInstr(x, instrReducer, blockContext);
+					blockContext.addApplyOp(x, instrReducer);
 				   } // Call on the SsaInstrReducer 
-				x: SsaPhi => {}
+				x: SsaPhi => {
+					def isLoopHeader = headerToLoop.has(block);
+					if (!isLoopHeader) continue; //TODO: merge blocks
+					def backedge: SsaCfEdge = block.preds[1];
+					def isInLoop = getLatestBlockContext(backedge.src.block()) != null;
+					if (!isInLoop) {
+						// Get optimized instruction from preheader
+						def preheader: SsaBlock = block.preds[0].src.block();
+						def preheaderContext = getLatestBlockContext(preheader);
+						def origPhiInput: SsaInstr = x.inputs[0].dest;
+						def optPhiInput: SsaInstr = preheaderContext.getOptInstr(origPhiInput);
+						blockContext.addPhi(x, optPhiInput);
+						continue;
+					}
+					// Get optimized instruction from updateBlock
+					def updateBlock: SsaBlock = block.preds[1].src.block();
+					def updateContext = getLatestBlockContext(updateBlock);
+					def origPhiInput: SsaInstr = x.inputs[1].dest;
+					def optPhiInput: SsaInstr = updateContext.getOptInstr(origPhiInput);
+					blockContext.addPhi(x, optPhiInput);
+
+				   }
 				x: SsaEnd => return evalSsaEnd(x, blockContext); 
 			}
 		}
 		if (DEBUG) Terminal.put1("SsaBlock uid %d missing SsaEnd\n", block.uid);
 		return;
 	}
+
 	// Returns the SRPO index to resume partial evaluation at 
 	def evalSsaEnd(end: SsaEnd, blockContext: PEBlockContext) {
 		// Partial evaluator is called after switches have been lowered to if statements
@@ -70,7 +126,7 @@ class PartialEvaluator {
 				// Case on whether the condition is variable or constant
 				var condInstr = x.input0();
 				if(SsaApplyOp.?(x.input0())) {
-					condInstr = blockContext.getOptInstr(SsaApplyOp.!(condInstr), blockContext);
+					condInstr = blockContext.getOptInstr(SsaApplyOp.!(condInstr));
 				}
 
 				if (SsaConst.?(condInstr)) {
@@ -133,13 +189,26 @@ class PartialEvaluator {
 	}
 }
 
-type OptMapKey(op: Operator, inputs: Array<SsaInstr>) {
+type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 	/**
 	 * Implicitly takes as input an additional OptMapKey when called
 	 * off of the type identifier
 	 */
 	def hash() -> int {
-		var hashResult: int = op.opcode.tag;
+		var hashResult: int = 0;
+		match (instr) {
+			x: SsaApplyOp => {
+				hashResult = x.op.opcode.tag;
+			   }
+			x: SsaPhi => {
+				// There are much less opcodes than this
+				hashResult = 300;
+			   }
+			_ => {
+				System.error("PartialEvaluationException", "Unsupported instruction type.\n");
+				return -1;
+			}
+		}
 		for (i in inputs) hashResult = hashResult * 33 + i.uid;
 		return hashResult;
 	}
@@ -148,14 +217,28 @@ type OptMapKey(op: Operator, inputs: Array<SsaInstr>) {
 	 * Implicitly takes as input an OptMapKey additional when called
 	 * off of the type identifier
 	 */
-	def eq(other: OptMapKey) -> bool {
-		def operatorsMatch = other.op == op;
-		return (other.op == op) && Arrays.allTrue(inputs, other.inputs, SsaInstr.==);
+	def equals(that: OptMapKey) -> bool {
+		match (that.instr) {
+			x: SsaApplyOp => {
+				if (!SsaApplyOp.?(this.instr)) return false;
+				if (x.op != SsaApplyOp.!(this.instr).op) return false;
+				return  Arrays.allTrue(this.inputs, that.inputs, SsaInstr.==);
+			   }
+			x: SsaPhi => return this == that;
+			_ => return false;
+		}
 	}
 
 	def render(buf: StringBuilder) -> StringBuilder {
-		op.render(buf);
-		buf.puts(" | ");
+		match (instr) {
+			x: SsaApplyOp => {
+				x.op.render(buf);
+				buf.puts(" | ");
+			   }
+			x: SsaPhi => {
+				buf.put1("Phi %d | ", x.uid);
+			   }
+		}
 		for (i = 0; i < inputs.length; i++) {
 			def instr = inputs[i];
 			buf.put1("uid: %d", instr.uid);
@@ -166,32 +249,36 @@ type OptMapKey(op: Operator, inputs: Array<SsaInstr>) {
 }
 
 // PE stands for "Partial Evaluation"
+/**
+ * Why keep optimization info map for each context? 
+ * Alternative: specialize the code
+ * MVP: ensure traversal is correct
+ * Afterward, it's possible we already have a specialization 
+ * we want to continue using. Instead of overspecializing, 
+ * it's possible we instead want to assume something is 
+ * constant for evaluating but assume different things
+ * are constant when specializing
+ *
+ * How do you use the map: replace all usages with the 
+ * instruction we map to.
+ */
 class PEBlockContext {
-	/**
-	 * Why keep optimization info map for each context? 
-	 * Alternative: specialize the code
-	 * MVP: ensure traversal is correct
-	 * Afterward, it's possible we already have a specialization 
-	 * we want to continue using. Instead of overspecializing, 
-	 * it's possible we instead want to assume something is 
-	 * constant for evaluating but assume different things
-	 * are constant when specializing
-	 *
-	 * How do you use the map: replace all usages with the 
-	 * instruction we map to.
-	 */
-	def optMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.eq);
-	def applyOpToOptMapKey(applyOp: SsaApplyOp) -> OptMapKey {
-		def dfEdges = applyOp.inputs;
-		def args = Arrays.map(dfEdges, SsaDfEdge.dest);
-		return OptMapKey(applyOp.op, args);
+	var optMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.equals);
+	new(predContext: PEBlockContext) {
+		if (predContext != null) optMap = Maps.copy<OptMapKey, SsaInstr>(predContext.optMap);
 	}
+	
+	def instrToOptMapKey(instr: SsaInstr) -> OptMapKey {
+		def dfEdges = instr.inputs;
+		def args = Arrays.map(dfEdges, SsaDfEdge.dest);
+		return OptMapKey(instr, args);
+	}
+
 	/** 
 	 * Returns the instruction with the cached and optimized arguments
 	 */
-	def optimizeArgs(i: SsaApplyOp, blockContext: PEBlockContext) -> SsaApplyOp {
-		def dfToInstrWithContext: SsaDfEdge -> SsaInstr = dfEdgeToInstr(blockContext, _);
-		def newArgs: Array<SsaInstr> = Arrays.map(i.inputs, dfToInstrWithContext);
+	def optimizeArgs(i: SsaApplyOp) -> SsaApplyOp {
+		def newArgs: Array<SsaInstr> = Arrays.map(i.inputs, dfEdgeToInstr);
 		Terminal.put1("Optimized args for %d: ", i.uid);
 		for (a in newArgs) {
 			Terminal.put1("%d ", a.uid);
@@ -200,9 +287,10 @@ class PEBlockContext {
 		// TODO: transfer facts
 		return SsaApplyOp.new(null, i.op, newArgs);
 	}
-	def addInstr(i: SsaApplyOp, instrReducer: SsaInstrReducer, blockContext: PEBlockContext) -> SsaInstr {
-		def copy = optimizeArgs(i, blockContext);
-		def key: OptMapKey = applyOpToOptMapKey(copy);
+
+	def addApplyOp(i: SsaApplyOp, instrReducer: SsaInstrReducer) -> SsaInstr {
+		def copy = optimizeArgs(i);
+		def key: OptMapKey = instrToOptMapKey(copy);
 		// Check if instr is already in map
 		if (optMap.has(key)) {
 			return optMap[key];
@@ -212,23 +300,31 @@ class PEBlockContext {
 		optMap[key] = reducedInstr;
 		return reducedInstr;
 	}
+
+	def addPhi(phi: SsaPhi, cur: SsaInstr) {
+		def key: OptMapKey = instrToOptMapKey(phi);
+		optMap[key] = cur;
+	}
 	/**
 	 * Mapping function over the list of dfEdges for an instruction.
 	 */
-	private def dfEdgeToInstr(blockContext: PEBlockContext, dfEdge: SsaDfEdge) -> SsaInstr {
-		if (!SsaApplyOp.?(dfEdge.dest)) return dfEdge.dest;
-		def applyOp = SsaApplyOp.!(dfEdge.dest);
-		if (!hasOptInstr(applyOp)) return dfEdge.dest;
-		return blockContext.getOptInstr(applyOp, blockContext);
+	private def dfEdgeToInstr(dfEdge: SsaDfEdge) -> SsaInstr {
+		if (SsaConst.?(dfEdge.dest)) return dfEdge.dest;
+		if (!hasOptInstr(dfEdge.dest)) return dfEdge.dest;
+		return getOptInstr(dfEdge.dest);
 	}
-	def hasOptInstr(i: SsaApplyOp) -> bool {
-		def key = applyOpToOptMapKey(i);
+
+	def hasOptInstr(i: SsaInstr) -> bool {
+		def key = instrToOptMapKey(i);
 		return optMap.has(key);
 	}
 
-	def getOptInstr(i: SsaApplyOp, blockContext: PEBlockContext) -> SsaInstr {
-		def copy = optimizeArgs(i, blockContext);
-		def key = applyOpToOptMapKey(copy);
+	def getOptInstr(i: SsaInstr) -> SsaInstr {
+		var instr = i;
+		if (SsaApplyOp.?(i)) {
+			instr = optimizeArgs(SsaApplyOp.!(i));
+		}
+		def key = instrToOptMapKey(instr);
 		Terminal.put2("getOptInstr | instr uid: %d | key: %q\n", i.uid, key.render);
 		if (!optMap.has(key)) {
 			def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
