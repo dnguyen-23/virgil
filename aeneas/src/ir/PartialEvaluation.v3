@@ -14,8 +14,10 @@ class PartialEvaluator {
 	def blockOrder: SsaBlockOrder;
 	def instrReducer: SsaInstrReducer;
 	var worklist: List<SsaBlock>;
-	def blockContextsMap = HashMap<SsaBlock, List<PEBlockContext>>.new(SsaBlock.uid, SsaBlock.==);
-	def headerToLoop = HashMap<SsaBlock, SsaLoopInfo>.new(SsaBlock.uid, SsaBlock.==);
+	def blockContextsMap = Ssa.newBlockMap<List<PEBlockContext>>();
+	def headerToLoop = Ssa.newBlockMap<SsaLoopInfo>();
+	var loopStack: List<LoopIterInfo>;
+
 	new (blockOrder, instrReducer) {
 		// Construct SRPO 
 		blockOrder.computeDominators();
@@ -41,6 +43,7 @@ class PartialEvaluator {
 	 * Returns the most recent context created for a block
 	 */
 	def getLatestBlockContext(block: SsaBlock) -> PEBlockContext {
+		if (!blockContextsMap.has(block)) return null;
 		def contextList = blockContextsMap[block];
 		return if (contextList == null, null, contextList.head);
 	}
@@ -48,27 +51,157 @@ class PartialEvaluator {
 	/**
 	 * Adds a new block context for the block
 	 */
-	def addNewBlockContext(block: SsaBlock, newContext: PEBlockContext) {
+	def addNewBlockContextToMap(block: SsaBlock, newContext: PEBlockContext) {
 		def oldContextList = blockContextsMap[block];
 		blockContextsMap[block] = List.new(newContext, oldContextList);
 	}
+
+	def intersect(
+		m1: PartialMap<OptMapKey, SsaInstr>, 
+		m2: PartialMap<OptMapKey, SsaInstr>
+	) -> PartialMap<OptMapKey, SsaInstr> {
+		def keys1 = Maps.keyList(m1);
+		def keys2 = Maps.keyList(m2);
+		if (keys1 == null) return m2;
+		if (keys2 == null) return m1;
+		def keys = if(Lists.length(keys1) < Lists.length(keys2), keys1, keys2);
+		def newMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.equals);
+		for (l = keys; l != null; l = l.tail) {
+			def k = l.head;
+			def bothHaveKey = m1.has(k) && m2.has(k);
+			if (!bothHaveKey) continue;
+			def m1Val = m1[k];
+			def m2Val = m2[k];
+			var sameInstr = m1Val == m2Val;
+			if (SsaApplyOp.?(m1Val) && SsaApplyOp.?(m2Val)) {
+				// Already know inputs and operator are the 
+				// same because OptMapKey is the same
+				sameInstr = true;
+			}
+			if (!sameInstr) continue;
+			newMap[k] = m1Val;
+		}
+
+		return newMap;
+	}
+
+	def mergeContexts(preds: Array<SsaBlock>) -> PEBlockContext {
+		if (preds.length == 0) return null;
+		def predContext = getLatestBlockContext(preds[0]);
+		if (predContext == null) throwNoContextsFound(preds[0]);
+		if (preds.length == 1) {
+			return PEBlockContext.new(predContext);
+		}
+		var resultMap: PartialMap<OptMapKey, SsaInstr> = predContext.optMap;
+
+		for (i = 1; i < preds.length; i++) {
+			def context = getLatestBlockContext(preds[i]);
+			if (context == null) throwNoContextsFound(preds[i]);
+			resultMap = intersect(resultMap, context.optMap);
+		}
+		def mergedContext = PEBlockContext.new(null);
+		mergedContext.optMap = HashMap<OptMapKey, SsaInstr>.!(resultMap);
+		return mergedContext;
+	}
+
+
 
 	/**
 	 * Creates a block context for the block given information about it.
 	 */
 	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
-		if (block.preds.length != 1) {
+		if (block.preds.length == 0) {
+			// Base case: Start block in CFG
 			def newContext = PEBlockContext.new(null);
-			addNewBlockContext(block, newContext);
+			addNewBlockContextToMap(block, newContext);
 			return newContext;
+		} else if (block.preds.length > 1) {
+			// Merge block
+			def cfToBlock = fun (cf: SsaCfEdge) => cf.src.block();
+			def allPredBlocks = Arrays.map<SsaCfEdge, SsaBlock>(block.preds, cfToBlock);
+			if (loopStack == null) {
+				// No loops. Refer to blockContextsMap for live preds
+				def cond = fun (b: SsaBlock) => blockContextsMap.has(b);
+				def livePreds = Arrays.filter(allPredBlocks, cond);
+				if (livePreds.length == 0) throwNoLivePredsFound(block);
+				def mergedContext = mergeContexts(livePreds);
+				addNewBlockContextToMap(block, mergedContext);
+				return mergedContext;
+			} 
+			// Currently in loop. Refer to mergeBlockMap for live preds
+			def livePreds = loopStack.head.getLivePreds(block);
+			if (livePreds.length == 0) throwNoLivePredsFound(block);
+			def mergedContext = mergeContexts(livePreds);
+			addNewBlockContextToMap(block, mergedContext);
+			return mergedContext;
 		}
+		// Build context off of sole predecessor
 		def cfEdge: SsaCfEdge = block.preds[0];
 		def pred: SsaBlock = cfEdge.src.block();
 		def lastPredContext = getLatestBlockContext(pred);
+		if (lastPredContext == null) throwNoContextsFound(pred);
 		def newContext = PEBlockContext.new(lastPredContext);
-		addNewBlockContext(block, newContext);
+		addNewBlockContextToMap(block, newContext);
 		return newContext;
 	}
+
+	/**
+	 * Uses the current block to determine whether or not we have 
+	 * left the current loop or entered a new loop.
+	 */
+	def updateLoopStack(block: SsaBlock) {
+		if (loopStack != null) {
+			// Handle breaks and new outer loop iterations
+			var curIterInfo: LoopIterInfo = loopStack.head;
+			var curLoopInfo: SsaLoopInfo = curIterInfo.info;
+			while (!blockOrder.isInLoop(block, curLoopInfo.index)) {
+				loopStack = loopStack.tail;
+				curLoopInfo = loopStack.head.info;
+			}
+		}
+
+		// Non-header blocks cannot start new loop or iteration
+		if (!headerToLoop.has(block)) return;
+
+		// Handle new loop iteration vs new loop traversal
+
+		def loopForHeader: SsaLoopInfo = headerToLoop[block];
+		if (loopStack == null) {
+			// Base case: New loop
+			def iterInfo = LoopIterInfo.new(loopForHeader);
+			loopStack = Lists.cons1(iterInfo);
+			return;
+		}
+
+		// New iteration
+		if (loopStack.head.info == loopForHeader) {
+			loopStack.head.newMergeBlockMap();
+			return;
+		} 
+		// New loop
+		def curLoopInfo: SsaLoopInfo = headerToLoop[block];
+		def iterInfo = LoopIterInfo.new(curLoopInfo);
+		loopStack = List.new(iterInfo, loopStack);
+		return;
+	}
+
+	def isMergeBlockPred(block: SsaBlock) -> bool {
+		def end = block.end();
+		if (!SsaGoto.?(end)) return false;
+		def goto = SsaGoto.!(end);
+		return goto.target().preds.length > 1;
+	}
+
+	def updateMergeBlockMap(block: SsaBlock) {
+		def goto = SsaGoto.!(block.end());
+		def mergeBlock = goto.target();
+		def iterInfo = loopStack.head;
+		var predList = iterInfo.mergeBlockMap[mergeBlock];
+		predList = List.new(block, predList);
+		iterInfo.mergeBlockMap[mergeBlock] = predList;
+	}
+
+
 	
 	/**
 	 * Evaluate the next block in the worklist. 
@@ -76,6 +209,10 @@ class PartialEvaluator {
 	def evalSsaBlock() {
 		if (worklist == null) return;
 		def block: SsaBlock = worklist.head;
+		updateLoopStack(block);
+		if (isMergeBlockPred(block) && loopStack != null) {
+			updateMergeBlockMap(block);
+		}
 		// TODO: identifiers for reusing contexts
 		def blockContext = createContextForBlock(block);
 		worklist = worklist.tail;
@@ -95,16 +232,20 @@ class PartialEvaluator {
 						// Get optimized instruction from preheader
 						def preheader: SsaBlock = block.preds[0].src.block();
 						def preheaderContext = getLatestBlockContext(preheader);
+						if (preheaderContext == null) throwNoContextsFound(preheader);
 						def origPhiInput: SsaInstr = x.inputs[0].dest;
 						def optPhiInput: SsaInstr = preheaderContext.getOptInstr(origPhiInput);
+						if (optPhiInput == null) throwOptInstrNotFound(origPhiInput);
 						blockContext.addPhi(x, optPhiInput);
 						continue;
 					}
 					// Get optimized instruction from updateBlock
 					def updateBlock: SsaBlock = block.preds[1].src.block();
 					def updateContext = getLatestBlockContext(updateBlock);
+					if (updateContext == null) throwNoContextsFound(updateBlock);
 					def origPhiInput: SsaInstr = x.inputs[1].dest;
 					def optPhiInput: SsaInstr = updateContext.getOptInstr(origPhiInput);
+					if (optPhiInput == null) throwOptInstrNotFound(origPhiInput);
 					blockContext.addPhi(x, optPhiInput);
 
 				   }
@@ -127,6 +268,7 @@ class PartialEvaluator {
 				var condInstr = x.input0();
 				if(SsaApplyOp.?(x.input0())) {
 					condInstr = blockContext.getOptInstr(SsaApplyOp.!(condInstr));
+					if (condInstr == null) throwOptInstrNotFound(x.input0());
 				}
 
 				if (SsaConst.?(condInstr)) {
@@ -161,31 +303,61 @@ class PartialEvaluator {
 				 * Case 2.) True branch targeting merge block;
 				 * 	original condition was constant through PE info
 				 * Case 3.) False branch targeting merge block
+				 * 
+				 * Merge block always comes after last block in false branch.
+				 * SRPO explores true branch, false branch, then merge block.
 				 */
 				def curSrpoNum = x.block().info.srpo_num;
-
-				/**
-				 * Merge block always comes after last block in false branch.
-				 * Our convention explores true branch, false branch, then merge block.
-				 */
 				def targetIsNextInSRPO = target.info.srpo_num == curSrpoNum + 1;
-				/**
-				 * False branch start block always comes after last block in 
-				 * true branch because SRPO requires exploring blocks in both branches 
-				 * before exploring the merge block.
-				 *
-				 * At SsaIf, adding the false branch start block means we intend to explore it.
-				 */
 				def falseBranchIgnored = worklist != null && (worklist.head.info.srpo_num != x.block().info.srpo_num + 1);
 				if (targetIsNextInSRPO || falseBranchIgnored) {
 					// Case 2.) and 3.) 
 					worklist = List<SsaBlock>.new(target, worklist);
+					return;
 				} 
 				// Case 1.) is noop; follow the worklist
 				return;
 			}
 			_ => return;
 		}
+	}
+
+	def throwNoLivePredsFound(block: SsaBlock) {
+		def msg = Strings.format1("Expected traversal of predecessors before merge block %d.\n", block.uid);
+		System.error("PartialEvaluatorException", msg);
+	}
+
+	def throwOptInstrNotFound(i: SsaInstr) {
+		def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
+		System.error("PartialEvaluationFailedException", msg);
+	}
+
+	def throwNoContextsFound(block: SsaBlock) {
+		def msg = Strings.format1("Block %d has no context", block.uid);
+		System.error("PartialEvaluationException", msg);
+	}
+}
+
+/**
+ * Used to track information about the current iteration of the loop
+ * the partial evaluator is in. Tracks the merge blocks that we will 
+ * traverse and the predecessors that have been traversed in this iteration.
+ */
+class LoopIterInfo {
+	def info: SsaLoopInfo;
+	var mergeBlockMap: PartialMap<SsaBlock, List<SsaBlock>>;
+
+	new (info) {
+		newMergeBlockMap();
+	}
+
+	def newMergeBlockMap() {
+		mergeBlockMap = Ssa.newBlockMap<List<SsaBlock>>();
+	}
+
+	def getLivePreds(block: SsaBlock) -> Array<SsaBlock> {
+		if (!mergeBlockMap.has(block)) return [];
+		return Lists.toArray(mergeBlockMap[block]);
 	}
 }
 
@@ -305,13 +477,20 @@ class PEBlockContext {
 		def key: OptMapKey = instrToOptMapKey(phi);
 		optMap[key] = cur;
 	}
+
+	def throwOptInstrNotFound(i: SsaInstr) {
+		def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
+		System.error("PartialEvaluationFailedException", msg);
+	}
 	/**
 	 * Mapping function over the list of dfEdges for an instruction.
 	 */
 	private def dfEdgeToInstr(dfEdge: SsaDfEdge) -> SsaInstr {
 		if (SsaConst.?(dfEdge.dest)) return dfEdge.dest;
 		if (!hasOptInstr(dfEdge.dest)) return dfEdge.dest;
-		return getOptInstr(dfEdge.dest);
+		def resultInstr = getOptInstr(dfEdge.dest);
+		if (resultInstr == null) throwOptInstrNotFound(dfEdge.dest);
+		return resultInstr;
 	}
 
 	def hasOptInstr(i: SsaInstr) -> bool {
@@ -327,11 +506,7 @@ class PEBlockContext {
 		}
 		def key = instrToOptMapKey(instr);
 		Terminal.put2("getOptInstr | instr uid: %d | key: %q\n", i.uid, key.render);
-		if (!optMap.has(key)) {
-			def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
-			System.error("PartialEvaluationFailedException", msg);
-			return null;
-		}
+		if (!optMap.has(key)) return null;
 		return optMap[key];
 	}
 }
