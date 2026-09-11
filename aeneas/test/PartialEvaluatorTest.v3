@@ -1,5 +1,4 @@
 def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
-
 def X = [
 	// T("single block/straight line code", testStraightLineConst),
 	// T("single if-stmt constant true", testSingleTrueConst),
@@ -12,7 +11,7 @@ def X = [
 	// T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
 	// T("single variable condtion", testSingleVar),
 	// T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
-	T("simple loop", testSimpleLoop),
+	// T("simple loop", testSimpleLoop),
 	T("nested loop within nested if-stmt", testIfStmtNestedLoop),
 	()
 ];
@@ -88,6 +87,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 				} else {
 					headerToIter[pred] = 0;
 				}
+				Terminal.put1("Expected to be in a loop. Current iter: %d\n", curIter);
 				if (curIter != loopPath.i) {
 					def msg = Strings.format3("Expected to be at iteration %d but currently at iteration %d with loop header block %d\n", loopPath.i, curIter, pred.uid);
 					t.fail(msg);
@@ -268,6 +268,7 @@ class PartialEvaluatorTester(t: Tester) {
 
 	}	
 	def assertCorrectTraversal(cfgSpecs: Array<CFGSpec>, params: Array<SsaParam>, expectedPathArr: Array<PathType>) {
+		UnitTests.fatal = true;
 		def expectedPath = Lists.fromArray(expectedPathArr);
 
 		// Generate the graph

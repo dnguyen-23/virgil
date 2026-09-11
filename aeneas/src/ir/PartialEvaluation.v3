@@ -110,8 +110,10 @@ class PartialEvaluator {
 	 * Creates a block context for the block given information about it.
 	 */
 	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
+		if (DEBUG) Terminal.put1("Created context for block %d.\n", block.uid);
 		if (block.preds.length == 0) {
 			// Base case: Start block in CFG
+			Terminal.put("\tRoot context case.\n");
 			def newContext = PEBlockContext.new(null);
 			addNewBlockContextToMap(block, newContext);
 			return newContext;
@@ -121,6 +123,7 @@ class PartialEvaluator {
 			def allPredBlocks = Arrays.map<SsaCfEdge, SsaBlock>(block.preds, cfToBlock);
 			if (loopStack == null) {
 				// No loops. Refer to blockContextsMap for live preds
+				Terminal.put("\tNot loop merge block\n");
 				def cond = fun (b: SsaBlock) => blockContextsMap.has(b);
 				def livePreds = Arrays.filter(allPredBlocks, cond);
 				if (livePreds.length == 0) throwNoLivePredsFound(block);
@@ -129,8 +132,19 @@ class PartialEvaluator {
 				return mergedContext;
 			} 
 			// Currently in loop. Refer to mergeBlockMap for live preds
+			Terminal.put("\tLoop merge block\n");
 			def livePreds = loopStack.head.getLivePreds(block);
-			if (livePreds.length == 0) throwNoLivePredsFound(block);
+			if (livePreds.length == 0) {
+				// Loop body untraversed. Entering loop
+				def loopEntrance = block.preds[0].src.block();
+				if (!blockContextsMap.has(loopEntrance)) throwNoLivePredsFound(block);
+				def predContext = getLatestBlockContext(loopEntrance);
+				def newContext = PEBlockContext.new(predContext);
+				addNewBlockContextToMap(block, newContext);
+				return newContext;
+
+			}
+			// Loop body traversed
 			def mergedContext = mergeContexts(livePreds);
 			addNewBlockContextToMap(block, mergedContext);
 			return mergedContext;
@@ -154,9 +168,9 @@ class PartialEvaluator {
 			// Handle breaks and new outer loop iterations
 			var curIterInfo: LoopIterInfo = loopStack.head;
 			var curLoopInfo: SsaLoopInfo = curIterInfo.info;
-			while (!blockOrder.isInLoop(block, curLoopInfo.index)) {
+			while (loopStack != null && !blockOrder.isInLoop(block, curLoopInfo.index)) {
 				loopStack = loopStack.tail;
-				curLoopInfo = loopStack.head.info;
+				curLoopInfo = if (loopStack != null, loopStack.head.info, curLoopInfo);
 			}
 		}
 
@@ -230,21 +244,32 @@ class PartialEvaluator {
 					def isInLoop = getLatestBlockContext(backedge.src.block()) != null;
 					if (!isInLoop) {
 						// Get optimized instruction from preheader
+						if (DEBUG) Terminal.put("\tLoop body not traversed yet\n");
 						def preheader: SsaBlock = block.preds[0].src.block();
 						def preheaderContext = getLatestBlockContext(preheader);
 						if (preheaderContext == null) throwNoContextsFound(preheader);
 						def origPhiInput: SsaInstr = x.inputs[0].dest;
 						def optPhiInput: SsaInstr = preheaderContext.getOptInstr(origPhiInput);
 						if (optPhiInput == null) throwOptInstrNotFound(origPhiInput);
+						if (DEBUG) {
+							Terminal.put2("Entering loop. Phi %d with input %d.\n", x.uid, optPhiInput.uid);
+						}
 						blockContext.addPhi(x, optPhiInput);
 						continue;
 					}
 					// Get optimized instruction from updateBlock
 					def updateBlock: SsaBlock = block.preds[1].src.block();
 					def updateContext = getLatestBlockContext(updateBlock);
+					Terminal.put1("Update context:\n%q\n", updateContext.render);
 					if (updateContext == null) throwNoContextsFound(updateBlock);
 					def origPhiInput: SsaInstr = x.inputs[1].dest;
 					def optPhiInput: SsaInstr = updateContext.getOptInstr(origPhiInput);
+					if (DEBUG) {
+						Terminal.put2("\tIs opt phi input %d const: %z\n", optPhiInput.uid, SsaConst.?(optPhiInput));
+						if (SsaConst.?(optPhiInput)) {
+							Terminal.put1("\tConst instr with val: %d\n", Int.unbox(SsaConst.!(optPhiInput).val));
+						}
+					}
 					if (optPhiInput == null) throwOptInstrNotFound(origPhiInput);
 					blockContext.addPhi(x, optPhiInput);
 
@@ -291,6 +316,11 @@ class PartialEvaluator {
 				def target = x.target();
 				if (target.preds.length == 1) {
 					if (DEBUG) Terminal.put1("\tGoto target %d has 1 predecessor.\n", target.uid);
+					worklist = List<SsaBlock>.new(target, worklist);
+					return;
+				}
+				if (headerToLoop.has(target)) {
+					if (DEBUG) Terminal.put1("\tGoto is backedge to loop header target %d. \n", target.uid);
 					worklist = List<SsaBlock>.new(target, worklist);
 					return;
 				}
@@ -396,7 +426,7 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 				if (x.op != SsaApplyOp.!(this.instr).op) return false;
 				return  Arrays.allTrue(this.inputs, that.inputs, SsaInstr.==);
 			   }
-			x: SsaPhi => return this == that;
+			x: SsaPhi => return this.instr == that.instr;
 			_ => return false;
 		}
 	}
@@ -439,6 +469,17 @@ class PEBlockContext {
 	new(predContext: PEBlockContext) {
 		if (predContext != null) optMap = Maps.copy<OptMapKey, SsaInstr>(predContext.optMap);
 	}
+
+	def render(buf: StringBuilder) -> StringBuilder {
+		buf.puts("opt info map:\n");
+		def keyList: List<OptMapKey> = Maps.keyList(optMap);
+		for (l = keyList; l != null; l = l.tail) {
+			def key = l.head;
+			buf.put2("\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
+		}
+		buf.puts("end of map\n");
+		return buf;
+	}
 	
 	def instrToOptMapKey(instr: SsaInstr) -> OptMapKey {
 		def dfEdges = instr.inputs;
@@ -450,8 +491,9 @@ class PEBlockContext {
 	 * Returns the instruction with the cached and optimized arguments
 	 */
 	def optimizeArgs(i: SsaApplyOp) -> SsaApplyOp {
+		Terminal.put1("optimize args for %d\n", i.uid);
+		Terminal.put1("%q", this.render);
 		def newArgs: Array<SsaInstr> = Arrays.map(i.inputs, dfEdgeToInstr);
-		Terminal.put1("Optimized args for %d: ", i.uid);
 		for (a in newArgs) {
 			Terminal.put1("%d ", a.uid);
 		}
@@ -468,7 +510,7 @@ class PEBlockContext {
 			return optMap[key];
 		}
 		def reducedInstr = instrReducer.reduceApplyOp(copy);
-		Terminal.put3("Instr uid %d | %q -> reduced uid %d\n", i.uid, key.render, reducedInstr.uid);
+		Terminal.put3("uid %d : (%q)   ->   uid %d\n", i.uid, key.render, reducedInstr.uid);
 		optMap[key] = reducedInstr;
 		return reducedInstr;
 	}
@@ -487,7 +529,10 @@ class PEBlockContext {
 	 */
 	private def dfEdgeToInstr(dfEdge: SsaDfEdge) -> SsaInstr {
 		if (SsaConst.?(dfEdge.dest)) return dfEdge.dest;
-		if (!hasOptInstr(dfEdge.dest)) return dfEdge.dest;
+		if (!hasOptInstr(dfEdge.dest)) {
+			Terminal.put2("\tInstr %d with key (%q) not found in map\n", dfEdge.dest.uid, instrToOptMapKey(dfEdge.dest).render);
+			return dfEdge.dest;
+		}
 		def resultInstr = getOptInstr(dfEdge.dest);
 		if (resultInstr == null) throwOptInstrNotFound(dfEdge.dest);
 		return resultInstr;
