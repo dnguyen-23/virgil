@@ -110,7 +110,7 @@ class PartialEvaluator {
 	 * Creates a block context for the block given information about it.
 	 */
 	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
-		if (DEBUG) Terminal.put1("Created context for block %d.\n", block.uid);
+		if (DEBUG) Terminal.put1("createContextForBlock  %d.\n", block.uid);
 		if (block.preds.length == 0) {
 			// Base case: Start block in CFG
 			Terminal.put("\tRoot context case.\n");
@@ -230,7 +230,7 @@ class PartialEvaluator {
 		// TODO: identifiers for reusing contexts
 		def blockContext = createContextForBlock(block);
 		worklist = worklist.tail;
-		if (DEBUG) Terminal.put1("Eval block uid: %d\n", block.uid);
+		if (DEBUG) Terminal.put1("evalSsaBlock uid: %d\n", block.uid);
 		for (instr = block.next; instr != block; instr = instr.next) {
 			match (instr) {
 				x: SsaApplyOp => {
@@ -258,9 +258,10 @@ class PartialEvaluator {
 						continue;
 					}
 					// Get optimized instruction from updateBlock
+					if (DEBUG) Terminal.put("\tLoop in progress\n");
 					def updateBlock: SsaBlock = block.preds[1].src.block();
 					def updateContext = getLatestBlockContext(updateBlock);
-					Terminal.put1("Update context:\n%q\n", updateContext.render);
+					Terminal.put1("\tUpdate block context:\n%q\n", updateContext.render);
 					if (updateContext == null) throwNoContextsFound(updateBlock);
 					def origPhiInput: SsaInstr = x.inputs[1].dest;
 					def optPhiInput: SsaInstr = updateContext.getOptInstr(origPhiInput);
@@ -314,6 +315,7 @@ class PartialEvaluator {
 			x: SsaGoto => { 
 				if (DEBUG) Terminal.put1("SsaGoto uid: %d\n", x.uid);
 				def target = x.target();
+				/* gotos we should traverse directly */
 				if (target.preds.length == 1) {
 					if (DEBUG) Terminal.put1("\tGoto target %d has 1 predecessor.\n", target.uid);
 					worklist = List<SsaBlock>.new(target, worklist);
@@ -324,6 +326,8 @@ class PartialEvaluator {
 					worklist = List<SsaBlock>.new(target, worklist);
 					return;
 				}
+				/* target has multiple predecessors */
+				
 				/**
 				 * Goto target is a merge block with 2 predecessors
 				 * Branching must have happened earlier in the CFG
@@ -339,13 +343,16 @@ class PartialEvaluator {
 				 */
 				def curSrpoNum = x.block().info.srpo_num;
 				def targetIsNextInSRPO = target.info.srpo_num == curSrpoNum + 1;
-				def falseBranchIgnored = worklist != null && (worklist.head.info.srpo_num != x.block().info.srpo_num + 1);
+				Terminal.put2("\tcur block srpo num: %d | target srpo: %d\n", curSrpoNum, target.info.srpo_num);
+				def falseBranchIgnored = worklist == null || (worklist.head.info.srpo_num != x.block().info.srpo_num + 1);
 				if (targetIsNextInSRPO || falseBranchIgnored) {
 					// Case 2.) and 3.) 
+					Terminal.put("\tGoto target directly\n");
 					worklist = List<SsaBlock>.new(target, worklist);
 					return;
 				} 
 				// Case 1.) is noop; follow the worklist
+				Terminal.put("\tFollow worklist\n");
 				return;
 			}
 			_ => return;
@@ -406,8 +413,12 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 				// There are much less opcodes than this
 				hashResult = 300;
 			   }
+			x: SsaParam => {
+				hashResult = 301;
+			   }
 			_ => {
-				System.error("PartialEvaluationException", "Unsupported instruction type.\n");
+				def msg = Strings.format1("Unsupported instruction type for instr: %d.\n", instr.uid);
+				System.error("PartialEvaluationException", msg);
 				return -1;
 			}
 		}
@@ -426,6 +437,7 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 				if (x.op != SsaApplyOp.!(this.instr).op) return false;
 				return  Arrays.allTrue(this.inputs, that.inputs, SsaInstr.==);
 			   }
+			x: SsaParam,
 			x: SsaPhi => return this.instr == that.instr;
 			_ => return false;
 		}
@@ -440,6 +452,10 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 			x: SsaPhi => {
 				buf.put1("Phi %d | ", x.uid);
 			   }
+			x: SsaParam => {
+				buf.put1("Param %d | ", x.uid);
+			   }
+
 		}
 		for (i = 0; i < inputs.length; i++) {
 			def instr = inputs[i];
@@ -471,13 +487,13 @@ class PEBlockContext {
 	}
 
 	def render(buf: StringBuilder) -> StringBuilder {
-		buf.puts("opt info map:\n");
+		buf.puts("\topt info map:\n");
 		def keyList: List<OptMapKey> = Maps.keyList(optMap);
 		for (l = keyList; l != null; l = l.tail) {
 			def key = l.head;
-			buf.put2("\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
+			buf.put2("\t\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
 		}
-		buf.puts("end of map\n");
+		buf.puts("\tend of map\n");
 		return buf;
 	}
 	
@@ -491,9 +507,9 @@ class PEBlockContext {
 	 * Returns the instruction with the cached and optimized arguments
 	 */
 	def optimizeArgs(i: SsaApplyOp) -> SsaApplyOp {
-		Terminal.put1("optimize args for %d\n", i.uid);
-		Terminal.put1("%q", this.render);
+		Terminal.put1("optimizeArgs %d\n", i.uid);
 		def newArgs: Array<SsaInstr> = Arrays.map(i.inputs, dfEdgeToInstr);
+		Terminal.put("\tNew args: ");
 		for (a in newArgs) {
 			Terminal.put1("%d ", a.uid);
 		}
@@ -544,13 +560,14 @@ class PEBlockContext {
 	}
 
 	def getOptInstr(i: SsaInstr) -> SsaInstr {
+		Terminal.put1("getOptInstr uid: %d\n", i.uid);
 		if (SsaConst.?(i)) return i;
 		var instr = i;
 		if (SsaApplyOp.?(i)) {
 			instr = optimizeArgs(SsaApplyOp.!(i));
 		}
 		def key = instrToOptMapKey(instr);
-		Terminal.put2("getOptInstr | instr uid: %d | key: %q\n", i.uid, key.render);
+		Terminal.put1("\tkey: (%q)\n", key.render);
 		if (!optMap.has(key)) return null;
 		return optMap[key];
 	}

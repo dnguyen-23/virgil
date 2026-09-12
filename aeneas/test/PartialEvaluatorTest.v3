@@ -1,18 +1,21 @@
 def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
 def X = [
-	// T("single block/straight line code", testStraightLineConst),
-	// T("single if-stmt constant true", testSingleTrueConst),
-	// T("single if-stmt constant false", testSingleFalseConst),
-	// T("series false -> true", testSeriesFalseTrueConst),
-	// T("series true -> false", testSeriesTrueFalseConst),
-	// T("series true -> false -> true", testSeriesTrueFalseTrueConst),
-	// T("nesting true -> false", testNestingTrueFalseConst),
-	// T("nesting false -> true", testNestingFalseTrueConst),
-	// T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
-	// T("single variable condtion", testSingleVar),
-	// T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
-	// T("simple loop", testSimpleLoop),
-	T("nested loop within nested if-stmt", testIfStmtNestedLoop),
+	T("single block/straight line code", testStraightLineConst),
+	T("single if-stmt constant true", testSingleTrueConst),
+	T("single if-stmt constant false", testSingleFalseConst),
+	T("series false -> true", testSeriesFalseTrueConst),
+	T("series true -> false", testSeriesTrueFalseConst),
+	T("series true -> false -> true", testSeriesTrueFalseTrueConst),
+	T("nesting true -> false", testNestingTrueFalseConst),
+	T("nesting false -> true", testNestingFalseTrueConst),
+	T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
+	T("single variable condtion", testSingleVar),
+	T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
+	T("simple loop", testSimpleLoop),
+	T("nested loop within if-stmt", testIfStmtNestedLoop),
+	T("nested if-stmt within loop", testLoopNestedIfStmt),
+	T("nested nested if-stmt within loop", testLoopNestedNestedIfStmt),
+	T("nested if-stmt in loop nested in if-stmt", testIfStmtLoopIfStmt),
 	()
 ];
 
@@ -36,6 +39,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 			assertCorrectPathChoice(worklist.head);
 			evalSsaBlock();
 		}
+		if (expectedPath != null) t.fail("Expected all paths traversed\n");
 	}
 
 	def popFromExpectedPath() -> PathType {
@@ -66,6 +70,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		def expected: PathType = popFromExpectedPath();	
 		match (expected) {
 			IfBranch => {
+				Terminal.put("Tester: expected If branch traversal\n");
 				def ifPath = PathType.IfBranch.!(expected);
 				def expectedBranch = ifPath.branch;
 				def curBranch = ifInstr.trueBlock() == curBlock;
@@ -75,6 +80,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 				}
 			}
 			ForILoop => {
+				Terminal.put("Tester: expected For loop branch traversal\n");
 				def loopPath = PathType.ForILoop.!(expected);
 				if (!assertHelpers.headerToBackedge.has(pred)) {
 					def msg = Strings.format1("Expected traversal of loop but not currently entering a loop body. Block uid: %d\n", curBlock.uid);
@@ -87,7 +93,6 @@ class MockedPartialEvaluator extends PartialEvaluator {
 				} else {
 					headerToIter[pred] = 0;
 				}
-				Terminal.put1("Expected to be in a loop. Current iter: %d\n", curIter);
 				if (curIter != loopPath.i) {
 					def msg = Strings.format3("Expected to be at iteration %d but currently at iteration %d with loop header block %d\n", loopPath.i, curIter, pred.uid);
 					t.fail(msg);
@@ -467,7 +472,7 @@ def testSeriesTrueFalseTrueConst(t: PartialEvaluatorTester) {
 			t.endSpec(0)
 		],
 		[],
-		[TRUE, FALSE]
+		[TRUE, FALSE, TRUE]
 	);
 }
 
@@ -529,6 +534,7 @@ def testTripleNestingWithWrongFourthBranchConst(t: PartialEvaluatorTester) {
 				true,
 				t.ifRuntimeConstSpec(
 					false,
+					t.blockEmptySpec(), //ignore
 					t.ifRuntimeConstSpec(
 						true,
 						t.blockEmptySpec(), 
@@ -537,8 +543,7 @@ def testTripleNestingWithWrongFourthBranchConst(t: PartialEvaluatorTester) {
 							t.blockEmptySpec(),
 							t.blockEmptySpec()
 						)
-					),
-					t.blockEmptySpec() //ignore
+					)
 				),
 				t.ifRuntimeConstSpec( //ignore
 					true,
@@ -609,7 +614,8 @@ def testSimpleLoop(t: PartialEvaluatorTester) {
 		[
 			LOOP(0),
 			LOOP(1),
-			LOOP(2)
+			LOOP(2), 
+			FALSE // loop exit
 		]
 	);
 
@@ -633,6 +639,104 @@ def testIfStmtNestedLoop(t: PartialEvaluatorTester) {
 			LOOP(1),
 			LOOP(2),
 			LOOP(3),
+			FALSE // loop exit
+		]
+	);
+
+}
+
+def testLoopNestedIfStmt(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(
+		[
+			t.forLoopConstSpec(4,
+				t.ifRuntimeConstSpec(
+					true, 
+					t.blockEmptySpec(),
+					t.blockEmptySpec()
+				)
+			),
+			t.endSpec(0)
+		],
+		[],
+		[
+			LOOP(0),
+			TRUE,
+			LOOP(1),
+			TRUE,
+			LOOP(2),
+			TRUE,
+			LOOP(3),
+			TRUE,
+		        FALSE	// loop exit
+		]
+	);
+
+}
+
+def testLoopNestedNestedIfStmt(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(
+		[
+			t.forLoopConstSpec(4,
+				t.ifRuntimeConstSpec(
+					true, 
+					t.ifRuntimeConstSpec(
+						false, 
+						t.blockEmptySpec(), //ignore
+						t.blockEmptySpec()
+					),
+					t.blockEmptySpec(), //ignore
+				)
+			),
+			t.endSpec(0)
+		],
+		[],
+		[
+			LOOP(0),
+				TRUE,
+				FALSE,
+			LOOP(1),
+				TRUE,
+				FALSE,
+			LOOP(2),
+				TRUE,
+				FALSE,
+			LOOP(3),
+				TRUE,
+				FALSE,
+		        FALSE	// loop exit
+		]
+	);
+
+}
+
+def testIfStmtLoopIfStmt (t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(
+		[
+			t.ifRuntimeConstSpec(
+				false,
+				t.blockEmptySpec(), // ignore
+				t.forLoopConstSpec(4,
+					t.ifRuntimeConstSpec(
+						true, 
+						t.blockEmptySpec(), 
+						t.blockEmptySpec(), //ignore
+					)
+				)
+			),
+			t.endSpec(0)
+		],
+		[],
+		[
+			FALSE,
+			LOOP(0),
+				TRUE,
+			LOOP(1),
+				TRUE,
+			LOOP(2),
+				TRUE,
+			LOOP(3),
+				TRUE,
+		        FALSE	// loop exit
 		]
 	);
 

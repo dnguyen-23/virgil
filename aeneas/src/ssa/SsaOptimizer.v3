@@ -1306,6 +1306,10 @@ class SsaInstrReducer(context: SsaContext) extends SsaInstrMatcher {
 	}
 
 	def i_const(v: int) -> SsaInstr {
+		Terminal.put1("i_const: %d\n", v);
+		if (inttype == null) Terminal.put("\tinttype is null\n");
+		if (graph == null) Terminal.put("\tgraph is null\n");
+		else Terminal.put1("\tinttype: %q\n", inttype.render);
 		return graph.intConst(Eval.doIntTrunc32(inttype, v));
 	}
 	def u_const(v: u32) -> SsaInstr {
