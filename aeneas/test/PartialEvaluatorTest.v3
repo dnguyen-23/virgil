@@ -16,6 +16,7 @@ def X = [
 	T("nested if-stmt within loop", testLoopNestedIfStmt),
 	T("nested nested if-stmt within loop", testLoopNestedNestedIfStmt),
 	T("nested if-stmt in loop nested in if-stmt", testIfStmtLoopIfStmt),
+	T("variable if-stmt with nested loops in both branches", testVarIfStmtWithLoops),
 	()
 ];
 
@@ -106,6 +107,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 // Easy input format for creating tests
 type CFGSpec {
 	case If(cond: Array<SsaInstr>, trueBranch: CFGSpec, falseBranch: CFGSpec);
+	case IfSingleBranch(cond: Array<SsaInstr>, trueBranch: CFGSpec);
 	case Loop(numIter: SsaInstr, body: CFGSpec);
 	case Block(instrs: Array<SsaInstr>);
 	case End(val: int);
@@ -188,15 +190,17 @@ class PartialEvaluatorTester(t: Tester) {
 				def trueBlock = SsaBlock.new();
 				builder.set(trueBlock);
 				cfgSpecToGraph0(builder, headerToBackedge, ifSpec.trueBranch);
-				builder.addGoto(mergeBlock);
+				def trueBranchEnd = builder.block.end();
+				if (!SsaReturn.?(trueBranchEnd)) builder.addGoto(mergeBlock);
 
 				def falseBlock = SsaBlock.new();
 				builder.set(falseBlock);
 				def cfgFalse: SsaBlock = cfgSpecToGraph0(builder, headerToBackedge, ifSpec.falseBranch);
-				builder.addGoto(mergeBlock);
+				def falseBranchEnd = builder.block.end();
+				if (!SsaReturn.?(falseBranchEnd)) builder.addGoto(mergeBlock);
 
 				builder.set(header);
-				// Constant isn't an instruction added to the block
+				// Constant isn't a instruction added to the block
 				if (ifSpec.cond.length == 1 && SsaConst.?(ifSpec.cond[0])) {
 					def condInstr = getUniqueConst(SsaConst.!(ifSpec.cond[0]), builder);
 					builder.addIf(condInstr, trueBlock, falseBlock);
@@ -212,6 +216,29 @@ class PartialEvaluatorTester(t: Tester) {
 				}
 				def condInstr = ifSpec.cond[numInstrs-1];
 				builder.addIf(condInstr, trueBlock, falseBlock);
+				builder.set(mergeBlock);
+				return mergeBlock;
+			}
+			IfSingleBranch => {
+				def ifSpec = CFGSpec.IfSingleBranch.!(spec);
+				def header = SsaBlock.new();
+				builder.addGoto(header);
+				builder.set(header);
+				
+				def mergeBlock = SsaBlock.new();
+				def branchBlock = SsaBlock.new();
+				// add conditions
+				for (i in ifSpec.cond) {
+					makeArgsUnique(i, builder);
+					builder.append(i);
+				}
+				def numInstrs = ifSpec.cond.length;
+				builder.addIf(ifSpec.cond[numInstrs - 1], branchBlock, mergeBlock);
+				// process the branch
+				builder.set(branchBlock);
+				cfgSpecToGraph0(builder, headerToBackedge, ifSpec.trueBranch);
+				def branchEnd = builder.block.end();
+				if (!SsaReturn.?(branchEnd)) builder.addGoto(mergeBlock);
 				builder.set(mergeBlock);
 				return mergeBlock;
 			}
@@ -315,9 +342,13 @@ class PartialEvaluatorTester(t: Tester) {
 		def condInstr: SsaConst = SsaConst.new(Bool.TYPE, condVal);
 		return CFGSpec.If(getRuntimeConstCond(condInstr, cond), trueSpec, falseSpec);
 	}
-
 	def ifVarSpec(param: SsaParam, trueSpec: CFGSpec, falseSpec: CFGSpec) -> CFGSpec {
 		return CFGSpec.If([param], trueSpec, falseSpec);
+	}
+	def ifRuntimeConstNoElseSpec(cond: bool, trueSpec: CFGSpec) -> CFGSpec {
+		def condVal: Val = if(cond, Bool.TRUE, Bool.FALSE);
+		def condInstr: SsaConst = SsaConst.new(Bool.TYPE, condVal);
+		return CFGSpec.IfSingleBranch(getRuntimeConstCond(condInstr, cond), trueSpec);
 	}
 	def blockEmptySpec() -> CFGSpec {
 		return CFGSpec.Block([]);
@@ -736,6 +767,52 @@ def testIfStmtLoopIfStmt (t: PartialEvaluatorTester) {
 				TRUE,
 			LOOP(3),
 				TRUE,
+		        FALSE	// loop exit
+		]
+	);
+
+}
+
+def testVarIfStmtWithLoops(t: PartialEvaluatorTester) {
+	def prms: TestParams = t.makeParams(1, 0);
+	t.assertCorrectTraversal(
+		[
+			t.ifVarSpec(
+				prms.getBool(0),
+				t.forLoopConstSpec(2,
+					t.ifRuntimeConstSpec(
+						true, 
+						t.blockEmptySpec(), 
+						t.blockEmptySpec(), //ignore
+					)
+				),
+				t.forLoopConstSpec(4,
+					t.ifRuntimeConstSpec(
+						false, 
+						t.blockEmptySpec(), 
+						t.blockEmptySpec(), //ignore
+					)
+				)
+			),
+			t.endSpec(0)
+		],
+		prms.toArray(),
+		[
+			TRUE,
+			LOOP(0),
+				TRUE,
+			LOOP(1),
+				TRUE,
+			FALSE,
+			FALSE,
+			LOOP(0),
+				FALSE,
+			LOOP(1),
+				FALSE,
+			LOOP(2),
+				FALSE,
+			LOOP(3),
+				FALSE,
 		        FALSE	// loop exit
 		]
 	);
