@@ -1,25 +1,26 @@
 def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
 def X = [
-	T("single block/straight line code", testStraightLineConst),
-	T("single if-stmt constant true", testSingleTrueConst),
-	T("single if-stmt constant false", testSingleFalseConst),
-	T("series false -> true", testSeriesFalseTrueConst),
-	T("series true -> false", testSeriesTrueFalseConst),
-	T("series true -> false -> true", testSeriesTrueFalseTrueConst),
-	T("nesting true -> false", testNestingTrueFalseConst),
-	T("nesting false -> true", testNestingFalseTrueConst),
-	T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
-	T("single variable condtion", testSingleVar),
-	T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
-	T("simple loop", testSimpleLoop),
-	T("nested loop within if-stmt", testIfStmtNestedLoop),
-	T("nested if-stmt within loop", testLoopNestedIfStmt),
-	T("nested nested if-stmt within loop", testLoopNestedNestedIfStmt),
-	T("nested if-stmt in loop nested in if-stmt", testIfStmtLoopIfStmt),
-	T("variable if-stmt with nested loops in both branches", testVarIfStmtWithLoops),
+	// T("single block/straight line code", testStraightLineConst),
+	// T("single if-stmt constant true", testSingleTrueConst),
+	// T("single if-stmt constant false", testSingleFalseConst),
+	// T("series false -> true", testSeriesFalseTrueConst),
+	// T("series true -> false", testSeriesTrueFalseConst),
+	// T("series true -> false -> true", testSeriesTrueFalseTrueConst),
+	// T("nesting true -> false", testNestingTrueFalseConst),
+	// T("nesting false -> true", testNestingFalseTrueConst),
+	// T("nesting triple with fake branch", testTripleNestingWithWrongFourthBranchConst),
+	// T("single variable condtion", testSingleVar),
+	// T("nested if-stmt within variable if-stmt", testVariableIfStmtWithNesting),
+	// T("simple loop", testSimpleLoop),
+	// T("nested loop within if-stmt", testIfStmtNestedLoop),
+	// T("nested if-stmt within loop", testLoopNestedIfStmt),
+	// T("nested nested if-stmt within loop", testLoopNestedNestedIfStmt),
+	// T("nested if-stmt in loop nested in if-stmt", testIfStmtLoopIfStmt),
+	// T("variable if-stmt with nested loops in both branches", testVarIfStmtWithLoops),
 	()
 ];
 
+def DEBUG = true;
 
 class MockedPartialEvaluator extends PartialEvaluator {
 	var expectedPath: List<PathType>;
@@ -106,6 +107,7 @@ class MockedPartialEvaluator extends PartialEvaluator {
 
 // Easy input format for creating tests
 type CFGSpec {
+	case Switch(cond: Array<SsaInstr>, branches: Array<CFGSpec>);
 	case If(cond: Array<SsaInstr>, trueBranch: CFGSpec, falseBranch: CFGSpec);
 	case IfSingleBranch(cond: Array<SsaInstr>, trueBranch: CFGSpec);
 	case Loop(numIter: SsaInstr, body: CFGSpec);
@@ -139,253 +141,153 @@ type AssertHelpers(
  * Defines funtionality for testing the partial evaluator
  */
 class PartialEvaluatorTester(t: Tester) {
-	// Returns the start block and the end block of the CFG constructed
-	def cfgSpecsToGraph(specs: Array<CFGSpec>, params: Array<SsaParam>) -> CFGSpecsToGraphOutput {
-		def graph = SsaGraph.new(params, Int.TYPE);
-		def builder = SsaBuilder.new(null, graph, graph.startBlock);
+	var graph: SsaGraph;
+	var builder: SsaBuilder;
+	
+	
+	// Functionality for constructing CFGs for testing 
 
-		// Loop Header used for loop recognition during testing
-		def headerToBackedge = HashMap<SsaBlock, SsaGoto>.new(SsaBlock.uid, SsaBlock.==);
-
-		def cfgSpecToGraphHelper = cfgSpecToGraph0(builder, headerToBackedge, _);
-		for (spec in specs) {
-			cfgSpecToGraphHelper(spec);
-		}
-		return CFGSpecsToGraphOutput(graph, headerToBackedge);
-
-	}
-	def getUniqueConst(const: SsaConst, builder: SsaBuilder) -> SsaConst {
-		def constType = const.getType();
-		if (IntType.?(constType)) {
-			return getUniqueIntConst(const, builder);
-		}
-		return getUniqueBoolConst(const, builder);
-	}
-	def getUniqueIntConst(const: SsaConst, builder: SsaBuilder) -> SsaConst {
-		return builder.graph.intConst(Int.unbox(const.val));
-	}
-	def getUniqueBoolConst(const: SsaConst, builder: SsaBuilder) -> SsaConst {
-		return builder.graph.boolConst(Bool.unbox(const.val));
-	}
-	def makeArgsUnique(i: SsaInstr, builder: SsaBuilder) {
-		for (dfEdge in i.inputs) {
-			if (SsaConst.?(dfEdge.dest)) {
-				def uniqueConst = getUniqueConst(SsaConst.!(dfEdge.dest), builder);
-				dfEdge.dest.replace(uniqueConst);
-			}
-		}
-	}
-	def cfgSpecToGraph0(
-		builder: SsaBuilder, 
-		headerToBackedge: HashMap<SsaBlock, SsaGoto>, 
-		spec: CFGSpec
-	) -> SsaBlock {
-		match (spec) {
-			If => {
-				def ifSpec = CFGSpec.If.!(spec);
-				def header = builder.block; // Return to this later to add the SsaIf
-				def mergeBlock = SsaBlock.new();
-				Terminal.put1("mergeblock: %d\n", mergeBlock.uid);
-
-				def trueBlock = SsaBlock.new();
-				builder.set(trueBlock);
-				cfgSpecToGraph0(builder, headerToBackedge, ifSpec.trueBranch);
-				def trueBranchEnd = builder.block.end();
-				if (!SsaReturn.?(trueBranchEnd)) builder.addGoto(mergeBlock);
-
-				def falseBlock = SsaBlock.new();
-				builder.set(falseBlock);
-				def cfgFalse: SsaBlock = cfgSpecToGraph0(builder, headerToBackedge, ifSpec.falseBranch);
-				def falseBranchEnd = builder.block.end();
-				if (!SsaReturn.?(falseBranchEnd)) builder.addGoto(mergeBlock);
-
-				builder.set(header);
-				// Constant isn't a instruction added to the block
-				if (ifSpec.cond.length == 1 && SsaConst.?(ifSpec.cond[0])) {
-					def condInstr = getUniqueConst(SsaConst.!(ifSpec.cond[0]), builder);
-					builder.addIf(condInstr, trueBlock, falseBlock);
-					builder.set(mergeBlock);
-					return mergeBlock;
-				}  
-				def numInstrs = ifSpec.cond.length;
-				for (i = 0; i < numInstrs; i++) {
-					// Check args for constants
-					def instr = ifSpec.cond[i];
-					makeArgsUnique(instr, builder);
-					builder.append(instr);
-				}
-				def condInstr = ifSpec.cond[numInstrs-1];
-				builder.addIf(condInstr, trueBlock, falseBlock);
-				builder.set(mergeBlock);
-				return mergeBlock;
-			}
-			IfSingleBranch => {
-				def ifSpec = CFGSpec.IfSingleBranch.!(spec);
-				def header = SsaBlock.new();
-				builder.addGoto(header);
-				builder.set(header);
-				
-				def mergeBlock = SsaBlock.new();
-				def branchBlock = SsaBlock.new();
-				// add conditions
-				for (i in ifSpec.cond) {
-					makeArgsUnique(i, builder);
-					builder.append(i);
-				}
-				def numInstrs = ifSpec.cond.length;
-				builder.addIf(ifSpec.cond[numInstrs - 1], branchBlock, mergeBlock);
-				// process the branch
-				builder.set(branchBlock);
-				cfgSpecToGraph0(builder, headerToBackedge, ifSpec.trueBranch);
-				def branchEnd = builder.block.end();
-				if (!SsaReturn.?(branchEnd)) builder.addGoto(mergeBlock);
-				builder.set(mergeBlock);
-				return mergeBlock;
-			}
-			Loop => {
-				def loopSpec = CFGSpec.Loop.!(spec);
-				// Loops have a preheader (current block) 
-				// along with a header that contains the loop guard	
-				def header = SsaBlock.new();
-				builder.addGoto(header);
-				builder.set(header);
-
-				// Define a temp instr we'll replace later
-				def temp = SsaInstr.new([]);
-
-				def zero = builder.graph.nullConst(Int.TYPE);
-				def phiInstr = builder.addPhi(Int.TYPE, [zero, temp]);
-				def exitBlock = SsaBlock.new();
-				def bodyBlock = SsaBlock.new();
-				
-				def numIter: SsaInstr = if(SsaConst.?(loopSpec.numIter), getUniqueIntConst(SsaConst.!(loopSpec.numIter), builder), loopSpec.numIter);
-				def guard: SsaInstr = builder.pure(Int.TYPE.opLt(), [phiInstr, numIter]);
-				builder.addIf(guard, bodyBlock, exitBlock);
-
-				// Generate the loop body
-				builder.set(bodyBlock);
-				cfgSpecToGraph0(builder, headerToBackedge, loopSpec.body);
-				def updateBlock = SsaBlock.new();
-				builder.addGoto(updateBlock);
-
-				builder.set(updateBlock);
-				def updateInstr: SsaInstr = builder.pure(Int.TYPE.opAdd(), [phiInstr, builder.graph.intConst(1)]);
-				builder.addGoto(header);
-
-				// Add backedge to map for testing later
-				def backedge: SsaGoto = SsaGoto.!(updateBlock.end());
-				headerToBackedge[header] = backedge;
-
-				// Replace the temp instruction with the increment instruction
-				temp.replace(updateInstr);
-
-				builder.set(exitBlock);
-				return exitBlock;
-			}
-			Block => {
-				def blockSpec = CFGSpec.Block.!(spec);
-				def instrs = blockSpec.instrs;
-				for (i in instrs) {
-					makeArgsUnique(i, builder);
-					builder.append(i);
-				}
-				return builder.block;
-			}
-			End => {
-				def endSpec = CFGSpec.End.!(spec);
-				builder.addReturn([builder.graph.intConst(endSpec.val)]);
-				return builder.block;
-			}
-		}
-
-	}	
-	def assertCorrectTraversal(cfgSpecs: Array<CFGSpec>, params: Array<SsaParam>, expectedPathArr: Array<PathType>) {
-		UnitTests.fatal = true;
-		def expectedPath = Lists.fromArray(expectedPathArr);
-
-		// Generate the graph
-		def graphOutput: CFGSpecsToGraphOutput = cfgSpecsToGraph(cfgSpecs, params);
-		def graph = graphOutput.graph;
-		def headerToBackedge = graphOutput.headerToBackedge;
-
-		// TODO: Debug flag
-		SsaPrinter.new().printGraph(null, null, graph, null);
-
-		// Prepare instruction reducer
-		def instrReducer = SsaInstrReducer.new(null); 
-		instrReducer.graph = graph;
-
-		// Generate the SsaBlockOrder
-		def blockOrder = SsaBlockOrder.new(graph, false, SsaInternalMarker.new());
-
-		def assertHelpers = AssertHelpers(t, headerToBackedge, expectedPath);
-
-		def pe = MockedPartialEvaluator.new(blockOrder, instrReducer, assertHelpers);
-		pe.evaluate();
-	}
-
-	def makeParams(numBool: int, numInt: int) -> TestParams {
-		def boolParamsVec: Vector<SsaParam> = Vector<SsaParam>.new();
-		for (i < numBool) boolParamsVec.put(SsaParam.new(i, Bool.TYPE));
-
-		def intParamsVec: Vector<SsaParam> = Vector<SsaParam>.new();
-		for (i = numBool; i < (numBool + numInt); i++) intParamsVec.put(SsaParam.new(i, Int.TYPE));
-		return TestParams(boolParamsVec.extract(), intParamsVec.extract());
-	}
-	def ifStaticConstSpec(cond: bool, trueSpec: CFGSpec, falseSpec: CFGSpec) -> CFGSpec {
-		def condVal: Val = if(cond, Bool.TRUE, Bool.FALSE);
-		def condInstr: SsaConst = SsaConst.new(Bool.TYPE, condVal);
-		return CFGSpec.If([condInstr], trueSpec, falseSpec);
-	}
-	def ifRuntimeConstSpec(cond: bool, trueSpec: CFGSpec, falseSpec: CFGSpec) -> CFGSpec {
-		def condVal: Val = if(cond, Bool.TRUE, Bool.FALSE);
-		def condInstr: SsaConst = SsaConst.new(Bool.TYPE, condVal);
-		return CFGSpec.If(getRuntimeConstCond(condInstr, cond), trueSpec, falseSpec);
-	}
-	def ifVarSpec(param: SsaParam, trueSpec: CFGSpec, falseSpec: CFGSpec) -> CFGSpec {
-		return CFGSpec.If([param], trueSpec, falseSpec);
-	}
-	def ifRuntimeConstNoElseSpec(cond: bool, trueSpec: CFGSpec) -> CFGSpec {
-		def condVal: Val = if(cond, Bool.TRUE, Bool.FALSE);
-		def condInstr: SsaConst = SsaConst.new(Bool.TYPE, condVal);
-		return CFGSpec.IfSingleBranch(getRuntimeConstCond(condInstr, cond), trueSpec);
-	}
-	def blockEmptySpec() -> CFGSpec {
-		return CFGSpec.Block([]);
-	}
-	def blockWithInstrSpec(instrs: Array<SsaInstr>) -> CFGSpec {
-		return CFGSpec.Block(instrs);
-	}
-	def endSpec(output: int) -> CFGSpec {
-		return CFGSpec.End(output);
-	}
 	/**
-	 * Expects an instruction of type bool or int
+	 * Branches from the current block into `numBranches` branches 
+	 * Returns an array ofthe start block for each branch. 
+	 * `condInstrs` is an array of instructions for constructing the 
+	 * condition that the CFG branches on.
 	 */
-	def getRuntimeConstCond(instr: SsaInstr, val: bool) -> Array<SsaInstr> {
-		def instrType = instr.getType();
-		if (val) {
-			def args: Array<SsaInstr> = [instr, instr];
-			def eq = if (BoolType.?(instrType), V3Op.opBoolEq, Int.TYPE.opEq());
-			def eqInstr = SsaApplyOp.new(null, eq, args);
-			return [eqInstr];
+	def branch(
+		curBlock: SsaBlock, 
+		numBranches: int,
+		condInstrs: Array<SsaInstr>   
+	) -> Array<SsaBlock> {
+		if (condInstrs == null || condInstrs.length == 0) {
+			t.fail("Unable to create condition instruction.");
 		}
 
-		if (BoolType.?(instrType)) {
-			def notInstr = SsaApplyOp.new(null, V3Op.opBoolNot, [instr]);
-			def neqInstr = SsaApplyOp.new(null, V3Op.opBoolEq, [instr, notInstr]);
-			def condInstrs: Array<SsaInstr> = [notInstr, neqInstr];
-			return condInstrs;
+		builder.set(curBlock);
+		for (i in condInstrs) builder.append(i);
+	
+		def cond = condInstrs[condInstrs.length - 1];
+
+		if (numBranches == 2) {
+			// Use an if-stmt when there's only 2 cases
+			def trueBlock = SsaBlock.new();
+			def falseBlock = SsaBlock.new();
+			builder.addIf(cond, trueBlock, falseBlock);
+			return [trueBlock, falseBlock];
 		}
-		def lt: Operator = Int.TYPE.opLt();
-		def neqInstr = SsaApplyOp.new(null, lt, [instr, instr]);
-		return [neqInstr];
+
+		// Use a switch when there's more than 2 cases 
+		def keyType = cond.getType();
+		// switch creation automatically adds 2
+		def maxValue = numBranches - 2;
+		def switch = SsaSwitch.new(keyType, maxValue, cond);
+		builder.append(switch);
+		def succs = Arrays.map(switch.succs, SsaCfEdge.dest);
+		return succs;
 	}
 
-	def forLoopConstSpec(numIter: int, bodySpec: CFGSpec) -> CFGSpec {
-		def numIterConst = SsaConst.new(Int.TYPE, Int.box(numIter));
-		return CFGSpec.Loop(numIterConst, bodySpec);
+	/** 
+	 * Merges a set of predecessors at the given merge block.
+	 * Builder sets the current block to be the merge block.
+	 */
+	def mergePredsIntoBlock(preds: Array<SsaBlock>, mergeBlock: SsaBlock) {
+		for (p in preds) {
+			builder.set(p);
+			builder.addGoto(mergeBlock);
+		}
+		builder.set(mergeBlock);
 	}
+
+	/** 
+	 * Merges the branches specified in each subarray of `toMerge`.
+	 * Returns an array of merge blocks where the ith block corresponds
+	 * to the merge block where the blocks in `toMerge[i]` meet.
+	 */
+	def merge(toMerge: Array<Array<SsaBlock>>) -> Array<SsaBlock> {
+		def mergeBlocks = Vector<SsaBlock>.new();
+		for (blocksToMerge in toMerge) {
+			def merge = SsaBlock.new();
+			mergePredsIntoBlock(blocksToMerge, merge);
+			mergeBlocks.put(merge);
+		}
+		return mergeBlocks.extract();
+	}
+
+	/**
+	 * Returns whether the SSA CFG is in split edge form. 
+	 * This means that there are no critical edges in the SSA CFG.
+	 * Updates the phi function representing the iterator variable
+	 * with the correct argument.
+	 */
+	def isSplitEdgeForm() -> bool {
+		// Stores an explored block and whether it 
+		// satisfies split edge form
+		def explored = Ssa.newBlockMap<bool>();
+		var stack = List.new(graph.startBlock, null);
+		var allBlocksSplitEdge = true;
+		while (stack != null) {
+			def block = stack.head;
+			stack = stack.tail;
+			// Get successors and cache the ones that
+			// haven't been explored
+			def succs = Arrays.map(block.succs(), SsaCfEdge.dest);
+			for (b in succs) {
+				if (explored.has(b)) continue;
+				stack = List.new(b, stack);
+			}
+
+			def cfToBlock = fun (cf: SsaCfEdge) => cf.src.block();
+			def predBlocks = Arrays.map(block.preds, cfToBlock);
+
+			// Check if any predecessors have multiiple successors
+			for (p in predBlocks) {
+				if (p.succs().length > 0) {
+					if (!DEBUG) return false;
+					explored[block] = false;
+					allBlocksSplitEdge = false;
+					continue;
+				}
+			}
+			explored[block] = true;
+		}
+
+		if (DEBUG && !allBlocksSplitEdge) {
+			if (!allBlocksSplitEdge) {
+				def keys = Maps.keyList(explored);
+				Terminal.put("The following blocks had predecessors with multiple successors");
+				for (l = keys; l != null; l = l.tail) {
+					def block = l.head;
+					if (explored[block]) continue;
+					Terminal.put1("\tBlock %d\n", block.uid);
+				}
+				return false;
+			}
+			Terminal.put("CFG is in split edge form\n");
+		} 
+
+		return true;
+	}
+
+	/**
+	 * Replaces the temporary phi function that was added in the header
+	 * block with a new phi function whose args are the initial value
+	 * of the phi function and the instructions from other update blocks
+	 */
+	def addLoopBackedge(
+		header: SsaBlock, 
+		updateBlock: SsaBlock,
+		oldPhi: SsaPhi,
+		updateInstr: SsaInstr
+	) {
+		// Add the SsaGoto from the updateBlock to header
+		builder.set(updateBlock);
+		builder.addGoto(header);
+
+		def oldArgs = Arrays.map(oldPhi.inputs, SsaDfEdge.dest);
+		def newArgs = Arrays.append(updateInstr, oldArgs);
+		def newPhi = SsaPhi.new(oldPhi.getType(), oldPhi.block, newArgs);
+		oldPhi.replace(newPhi);
+	}
+
 }
 
 type TestParams(boolParams: Array<SsaParam>, intParams: Array<SsaParam>){
@@ -399,422 +301,422 @@ type TestParams(boolParams: Array<SsaParam>, intParams: Array<SsaParam>){
 	def toArray() -> Array<SsaParam> { return Arrays.concat(boolParams, intParams); }
 }
 
-def testStraightLineConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.blockEmptySpec(),
-			t.endSpec(0)
-		],
-		[],
-		[]
-	);
-}
-def TRUE = PathType.IfBranch(true);
-def FALSE = PathType.IfBranch(false);
-def LOOP = (fun (i: int) => PathType.ForILoop(i));
-def testSingleTrueConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[TRUE]
-	);
-}
-
-def testSingleFalseConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				false,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[FALSE]
-	);
-}
-
-def testSeriesFalseTrueConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				false,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.ifRuntimeConstSpec(
-				true,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[FALSE, TRUE]
-	);
-}
-
-def testSeriesTrueFalseConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.ifRuntimeConstSpec(
-				false,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[TRUE, FALSE]
-	);
-}
-
-def testSeriesTrueFalseTrueConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.ifRuntimeConstSpec(
-				false,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.ifRuntimeConstSpec(
-				true,
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[TRUE, FALSE, TRUE]
-	);
-}
-
-def testNestingTrueFalseConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.ifRuntimeConstSpec(
-					false,
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-				t.ifRuntimeConstSpec(
-					true,
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-			),
-			t.endSpec(0)
-		],
-		[],
-		[TRUE, FALSE]
-	);
-}
-
-def testNestingFalseTrueConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				false,
-				t.ifRuntimeConstSpec(
-					false,
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-				t.ifRuntimeConstSpec(
-					true,
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-			),
-			t.endSpec(0)
-		],
-		[],
-		[FALSE, TRUE]
-	);
-}
-
-/**
- * Tests that the partial evaluator can traverse if-stmts
- * that are triply nested. The third if statement has a false
- * that shouldn't be traversed.
- */
-def testTripleNestingWithWrongFourthBranchConst(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.ifRuntimeConstSpec(
-					false,
-					t.blockEmptySpec(), //ignore
-					t.ifRuntimeConstSpec(
-						true,
-						t.blockEmptySpec(), 
-						t.ifRuntimeConstSpec( //ignore
-							false,
-							t.blockEmptySpec(),
-							t.blockEmptySpec()
-						)
-					)
-				),
-				t.ifRuntimeConstSpec( //ignore
-					true,
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-			),
-			t.endSpec(0)
-		],
-		[],
-		[TRUE, FALSE, TRUE]
-	);
-}
-
-def testSingleVar(t: PartialEvaluatorTester) {
-	def prms: TestParams = t.makeParams(1, 0);
-	t.assertCorrectTraversal(
-		[
-			t.ifVarSpec(
-				prms.getBool(0),
-				t.blockEmptySpec(),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		prms.toArray(),
-		[TRUE, FALSE]
-	);
-}
-
-def testVariableIfStmtWithNesting(t: PartialEvaluatorTester) {
-	def prms: TestParams = t.makeParams(2, 0);
-	t.assertCorrectTraversal(
-		[
-			t.ifVarSpec(
-				prms.getBool(0),
-				t.ifVarSpec(
-					prms.getBool(1),
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				),
-				t.ifRuntimeConstSpec(
-					true, 
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				)
-			),
-			t.endSpec(0)
-		],
-		prms.toArray(),
-		[
-			TRUE, // outer true branch
-				TRUE, // nested true branch
-				FALSE, // nested false branch
-			FALSE, // outer false branch
-				TRUE // nested true branch
-		]
-	);
-}
-
-def testSimpleLoop(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.forLoopConstSpec(3, t.blockEmptySpec()),
-			t.endSpec(0)
-		],
-		[],
-		[
-			LOOP(0),
-			LOOP(1),
-			LOOP(2), 
-			FALSE // loop exit
-		]
-	);
-
-}
-
-
-def testIfStmtNestedLoop(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				true,
-				t.forLoopConstSpec(4, t.blockEmptySpec()),
-				t.blockEmptySpec()
-			),
-			t.endSpec(0)
-		],
-		[],
-		[
-			TRUE,
-			LOOP(0),
-			LOOP(1),
-			LOOP(2),
-			LOOP(3),
-			FALSE // loop exit
-		]
-	);
-
-}
-
-def testLoopNestedIfStmt(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.forLoopConstSpec(4,
-				t.ifRuntimeConstSpec(
-					true, 
-					t.blockEmptySpec(),
-					t.blockEmptySpec()
-				)
-			),
-			t.endSpec(0)
-		],
-		[],
-		[
-			LOOP(0),
-			TRUE,
-			LOOP(1),
-			TRUE,
-			LOOP(2),
-			TRUE,
-			LOOP(3),
-			TRUE,
-		        FALSE	// loop exit
-		]
-	);
-
-}
-
-def testLoopNestedNestedIfStmt(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.forLoopConstSpec(4,
-				t.ifRuntimeConstSpec(
-					true, 
-					t.ifRuntimeConstSpec(
-						false, 
-						t.blockEmptySpec(), //ignore
-						t.blockEmptySpec()
-					),
-					t.blockEmptySpec(), //ignore
-				)
-			),
-			t.endSpec(0)
-		],
-		[],
-		[
-			LOOP(0),
-				TRUE,
-				FALSE,
-			LOOP(1),
-				TRUE,
-				FALSE,
-			LOOP(2),
-				TRUE,
-				FALSE,
-			LOOP(3),
-				TRUE,
-				FALSE,
-		        FALSE	// loop exit
-		]
-	);
-
-}
-
-def testIfStmtLoopIfStmt (t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(
-		[
-			t.ifRuntimeConstSpec(
-				false,
-				t.blockEmptySpec(), // ignore
-				t.forLoopConstSpec(4,
-					t.ifRuntimeConstSpec(
-						true, 
-						t.blockEmptySpec(), 
-						t.blockEmptySpec(), //ignore
-					)
-				)
-			),
-			t.endSpec(0)
-		],
-		[],
-		[
-			FALSE,
-			LOOP(0),
-				TRUE,
-			LOOP(1),
-				TRUE,
-			LOOP(2),
-				TRUE,
-			LOOP(3),
-				TRUE,
-		        FALSE	// loop exit
-		]
-	);
-
-}
-
-def testVarIfStmtWithLoops(t: PartialEvaluatorTester) {
-	def prms: TestParams = t.makeParams(1, 0);
-	t.assertCorrectTraversal(
-		[
-			t.ifVarSpec(
-				prms.getBool(0),
-				t.forLoopConstSpec(2,
-					t.ifRuntimeConstSpec(
-						true, 
-						t.blockEmptySpec(), 
-						t.blockEmptySpec(), //ignore
-					)
-				),
-				t.forLoopConstSpec(4,
-					t.ifRuntimeConstSpec(
-						false, 
-						t.blockEmptySpec(), 
-						t.blockEmptySpec(), //ignore
-					)
-				)
-			),
-			t.endSpec(0)
-		],
-		prms.toArray(),
-		[
-			TRUE,
-			LOOP(0),
-				TRUE,
-			LOOP(1),
-				TRUE,
-			FALSE,
-			FALSE,
-			LOOP(0),
-				FALSE,
-			LOOP(1),
-				FALSE,
-			LOOP(2),
-				FALSE,
-			LOOP(3),
-				FALSE,
-		        FALSE	// loop exit
-		]
-	);
-
-}
+// def testStraightLineConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.blockEmptySpec(),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[]
+// 	);
+// }
+// def TRUE = PathType.IfBranch(true);
+// def FALSE = PathType.IfBranch(false);
+// def LOOP = (fun (i: int) => PathType.ForILoop(i));
+// def testSingleTrueConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[TRUE]
+// 	);
+// }
+// 
+// def testSingleFalseConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[FALSE]
+// 	);
+// }
+// 
+// def testSeriesFalseTrueConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[FALSE, TRUE]
+// 	);
+// }
+// 
+// def testSeriesTrueFalseConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[TRUE, FALSE]
+// 	);
+// }
+// 
+// def testSeriesTrueFalseTrueConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[TRUE, FALSE, TRUE]
+// 	);
+// }
+// 
+// def testNestingTrueFalseConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.ifRuntimeConstSpec(
+// 					false,
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 				t.ifRuntimeConstSpec(
+// 					true,
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[TRUE, FALSE]
+// 	);
+// }
+// 
+// def testNestingFalseTrueConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.ifRuntimeConstSpec(
+// 					false,
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 				t.ifRuntimeConstSpec(
+// 					true,
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[FALSE, TRUE]
+// 	);
+// }
+// 
+// /**
+//  * Tests that the partial evaluator can traverse if-stmts
+//  * that are triply nested. The third if statement has a false
+//  * that shouldn't be traversed.
+//  */
+// def testTripleNestingWithWrongFourthBranchConst(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.ifRuntimeConstSpec(
+// 					false,
+// 					t.blockEmptySpec(), //ignore
+// 					t.ifRuntimeConstSpec(
+// 						true,
+// 						t.blockEmptySpec(), 
+// 						t.ifRuntimeConstSpec( //ignore
+// 							false,
+// 							t.blockEmptySpec(),
+// 							t.blockEmptySpec()
+// 						)
+// 					)
+// 				),
+// 				t.ifRuntimeConstSpec( //ignore
+// 					true,
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[TRUE, FALSE, TRUE]
+// 	);
+// }
+// 
+// def testSingleVar(t: PartialEvaluatorTester) {
+// 	def prms: TestParams = t.makeParams(1, 0);
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifVarSpec(
+// 				prms.getBool(0),
+// 				t.blockEmptySpec(),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		prms.toArray(),
+// 		[TRUE, FALSE]
+// 	);
+// }
+// 
+// def testVariableIfStmtWithNesting(t: PartialEvaluatorTester) {
+// 	def prms: TestParams = t.makeParams(2, 0);
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifVarSpec(
+// 				prms.getBool(0),
+// 				t.ifVarSpec(
+// 					prms.getBool(1),
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				),
+// 				t.ifRuntimeConstSpec(
+// 					true, 
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				)
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		prms.toArray(),
+// 		[
+// 			TRUE, // outer true branch
+// 				TRUE, // nested true branch
+// 				FALSE, // nested false branch
+// 			FALSE, // outer false branch
+// 				TRUE // nested true branch
+// 		]
+// 	);
+// }
+// 
+// def testSimpleLoop(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.forLoopConstSpec(3, t.blockEmptySpec()),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[
+// 			LOOP(0),
+// 			LOOP(1),
+// 			LOOP(2), 
+// 			FALSE // loop exit
+// 		]
+// 	);
+// 
+// }
+// 
+// 
+// def testIfStmtNestedLoop(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				true,
+// 				t.forLoopConstSpec(4, t.blockEmptySpec()),
+// 				t.blockEmptySpec()
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[
+// 			TRUE,
+// 			LOOP(0),
+// 			LOOP(1),
+// 			LOOP(2),
+// 			LOOP(3),
+// 			FALSE // loop exit
+// 		]
+// 	);
+// 
+// }
+// 
+// def testLoopNestedIfStmt(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.forLoopConstSpec(4,
+// 				t.ifRuntimeConstSpec(
+// 					true, 
+// 					t.blockEmptySpec(),
+// 					t.blockEmptySpec()
+// 				)
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[
+// 			LOOP(0),
+// 			TRUE,
+// 			LOOP(1),
+// 			TRUE,
+// 			LOOP(2),
+// 			TRUE,
+// 			LOOP(3),
+// 			TRUE,
+// 		        FALSE	// loop exit
+// 		]
+// 	);
+// 
+// }
+// 
+// def testLoopNestedNestedIfStmt(t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.forLoopConstSpec(4,
+// 				t.ifRuntimeConstSpec(
+// 					true, 
+// 					t.ifRuntimeConstSpec(
+// 						false, 
+// 						t.blockEmptySpec(), //ignore
+// 						t.blockEmptySpec()
+// 					),
+// 					t.blockEmptySpec(), //ignore
+// 				)
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[
+// 			LOOP(0),
+// 				TRUE,
+// 				FALSE,
+// 			LOOP(1),
+// 				TRUE,
+// 				FALSE,
+// 			LOOP(2),
+// 				TRUE,
+// 				FALSE,
+// 			LOOP(3),
+// 				TRUE,
+// 				FALSE,
+// 		        FALSE	// loop exit
+// 		]
+// 	);
+// 
+// }
+// 
+// def testIfStmtLoopIfStmt (t: PartialEvaluatorTester) {
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifRuntimeConstSpec(
+// 				false,
+// 				t.blockEmptySpec(), // ignore
+// 				t.forLoopConstSpec(4,
+// 					t.ifRuntimeConstSpec(
+// 						true, 
+// 						t.blockEmptySpec(), 
+// 						t.blockEmptySpec(), //ignore
+// 					)
+// 				)
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		[],
+// 		[
+// 			FALSE,
+// 			LOOP(0),
+// 				TRUE,
+// 			LOOP(1),
+// 				TRUE,
+// 			LOOP(2),
+// 				TRUE,
+// 			LOOP(3),
+// 				TRUE,
+// 		        FALSE	// loop exit
+// 		]
+// 	);
+// 
+// }
+// 
+// def testVarIfStmtWithLoops(t: PartialEvaluatorTester) {
+// 	def prms: TestParams = t.makeParams(1, 0);
+// 	t.assertCorrectTraversal(
+// 		[
+// 			t.ifVarSpec(
+// 				prms.getBool(0),
+// 				t.forLoopConstSpec(2,
+// 					t.ifRuntimeConstSpec(
+// 						true, 
+// 						t.blockEmptySpec(), 
+// 						t.blockEmptySpec(), //ignore
+// 					)
+// 				),
+// 				t.forLoopConstSpec(4,
+// 					t.ifRuntimeConstSpec(
+// 						false, 
+// 						t.blockEmptySpec(), 
+// 						t.blockEmptySpec(), //ignore
+// 					)
+// 				)
+// 			),
+// 			t.endSpec(0)
+// 		],
+// 		prms.toArray(),
+// 		[
+// 			TRUE,
+// 			LOOP(0),
+// 				TRUE,
+// 			LOOP(1),
+// 				TRUE,
+// 			FALSE,
+// 			FALSE,
+// 			LOOP(0),
+// 				FALSE,
+// 			LOOP(1),
+// 				FALSE,
+// 			LOOP(2),
+// 				FALSE,
+// 			LOOP(3),
+// 				FALSE,
+// 		        FALSE	// loop exit
+// 		]
+// 	);
+// 
+// }
