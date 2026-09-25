@@ -1,6 +1,7 @@
 def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new, _);
 def X = [
 	T("if-else stmt", testIfElseStmt),
+	T("for loop", testForLoop),
 	// T("single block/straight line code", testStraightLineConst),
 	// T("single if-stmt constant true", testSingleTrueConst),
 	// T("single if-stmt constant false", testSingleFalseConst),
@@ -25,7 +26,6 @@ def DEBUG = true;
 
 class MockedPartialEvaluator extends PartialEvaluator {
 	var expectedPath: List<PathType>;
-	var failed = false;
 	def assertHelpers: AssertHelpers;
 	var t: Tester;
 	private def headerToIter = HashMap<SsaBlock, int>.new(SsaBlock.uid, SsaBlock.==);
@@ -154,17 +154,20 @@ class PartialEvaluatorTester(t: Tester) {
 	 * to partially evaluate. 
 	 */
 	def assertCorrectTraversal(
-		genCFG: SsaBlock -> void,
+		genCFG: SsaBlock -> SsaBlock,
 		expected: Array<PathType>
 	) {
 		graph = SsaGraph.new([], Int.TYPE);
 		builder = SsaBuilder.new(null, graph, graph.startBlock);
 		headerToBackedge = HashMap<SsaBlock, SsaGoto>.new(SsaBlock.uid, SsaBlock.==);
 		genCFG(graph.startBlock);
+
+		UnitTests.fatal = true;
 		
 		if (DEBUG) {
 			def printer = SsaPrinter.new();
 			printer.printGraph(null, null, graph, null);
+			// t.fail("asdf");
 		}
 		def marker = SsaInternalMarker.new();
 		marker.graph = graph;
@@ -315,10 +318,15 @@ class PartialEvaluatorTester(t: Tester) {
 		builder.set(updateBlock);
 		builder.addGoto(headerBlock);
 
+		headerToBackedge[headerBlock] = SsaGoto.!(updateBlock.end());
+
 		def oldArgs = Arrays.map(oldPhi.inputs, SsaDfEdge.dest);
 		def newArgs = Arrays.append(updateInstr, oldArgs);
 		def newPhi = SsaPhi.new(oldPhi.getType(), oldPhi.block, newArgs);
 		oldPhi.replace(newPhi);
+		newPhi.insertBefore(oldPhi);
+		oldPhi.remove();
+
 	}
 
 	/**
@@ -332,34 +340,83 @@ class PartialEvaluatorTester(t: Tester) {
 	 * performing the branching and the second element is the 
 	 * merge block.
 	 */
-	def ifElseStmt(
-		condInstrs: Array<SsaInstr>, 
+	def genIfElseConstStmt(
+		condVal: bool,
+		genTrue: SsaBlock -> SsaBlock,
+		genFalse: SsaBlock -> SsaBlock,
 		curBlock: SsaBlock
-	) -> (SsaBlock, SsaBlock) {
-		if (condInstrs.length == 0) {
-			t.fail("Cannot make if-else-stmt without a condition");
-		}
-
+	) -> SsaBlock {
+		def condInstrs = runtimeConstCond(condVal);
 		def branchBlocks = branch(curBlock, 2, condInstrs);
-		def mergeBlocks = merge([branchBlocks]);
+		def trueEndBlock = genTrue(branchBlocks[0]);
+		def falseEndBlock = genFalse(branchBlocks[1]);
+		def mergeBlocks = merge([[trueEndBlock, falseEndBlock]]);
 		def mergeBlock = mergeBlocks[0];
-		return (curBlock, mergeBlock);
+		builder.set(mergeBlock);
+		return mergeBlock;
 	}
 
-	def ifStmt(
+	def genIfStmt(
 		condInstrs: Array<SsaInstr>,
+		genTrue: SsaBlock -> SsaBlock,
 		curBlock: SsaBlock
-	) -> (SsaBlock, SsaBlock) {
+	) -> SsaBlock {
 		if (condInstrs.length == 0) {
 			t.fail("Cannot make if-else-stmt without a condition");
 		}
 
 		def branchBlocks = branch(curBlock, 2, condInstrs);
-		def trueBlock = branchBlocks[0];
 		def falseBlock = branchBlocks[1];
-		builder.set(trueBlock);
+
+		def trueBlock = branchBlocks[0];
+		def trueEndBlock = genTrue(trueBlock);
+
 		builder.addGoto(falseBlock);
-		return (curBlock, falseBlock);
+		builder.set(falseBlock);
+
+		return falseBlock;
+	}
+
+	def genForLoop(
+		numIter: int, 
+		genBody: SsaBlock -> SsaBlock, 
+		curBlock: SsaBlock
+	) -> SsaBlock {
+		builder.set(curBlock);
+		def header = SsaBlock.new();
+
+		builder.addGoto(header);
+		builder.set(header);
+
+		def tempPhi = SsaPhi.new(Int.TYPE, header, [graph.intConst(0)]);
+		def limit = graph.intConst(numIter);
+		def cond = SsaApplyOp.new(null, Int.TYPE.opLt(), [tempPhi, limit]);
+		def branchBlocks = branch(header, 2, [tempPhi, cond]);
+		def exitBlock = branchBlocks[1];
+
+		def loopBodyStart = branchBlocks[0];
+		def loopBodyEnd = genBody(loopBodyStart);
+
+		def updateInstr = SsaApplyOp.new(null, Int.TYPE.opAdd(), [tempPhi, graph.intConst(1)]);
+		builder.append(updateInstr);
+		
+		addLoopBackedge(header, loopBodyEnd, tempPhi, updateInstr);
+		builder.set(exitBlock);
+		return exitBlock;
+	}
+
+	def genForLoopWithIfElseStmt(
+		numIter: int,
+		cond: bool,
+		curBlock: SsaBlock
+	) -> SsaBlock {
+		def nestedIf = genIfElseConstStmt(cond, genBlock, genBlock, _);
+		return genForLoop(numIter, nestedIf, curBlock);
+	}
+
+	def genBlock(curBlock: SsaBlock) -> SsaBlock { 
+		builder.set(curBlock);
+		return curBlock;
 	}
 
 	def runtimeConstCond(cond: bool) -> Array<SsaInstr> {
@@ -369,11 +426,6 @@ class PartialEvaluatorTester(t: Tester) {
 		def args: Array<SsaInstr> = if(cond, [trueConst, trueConst], [trueConst, falseConst]);
 		def condInstr = SsaApplyOp.new(null, op, args);
 		return [condInstr];
-	}
-
-	def genIfElseStmt(cond: bool, startBlock: SsaBlock) {
-		ifElseStmt(runtimeConstCond(cond), startBlock);
-		builder.addReturn([graph.intConst(0)]);
 	}
 
 }
@@ -393,8 +445,13 @@ def FALSE = PathType.IfBranch(false);
 def LOOP = (fun (i: int) => PathType.ForILoop(i));
 
 def testIfElseStmt(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(t.genIfElseStmt(true, _), [TRUE, FALSE]);
-	t.assertCorrectTraversal(t.genIfElseStmt(false, _), [TRUE, FALSE]);
+	t.assertCorrectTraversal(t.genIfElseConstStmt(true, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
+	t.assertCorrectTraversal(t.genIfElseConstStmt(false, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
+}
+
+def testForLoop(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(t.genForLoop(3, t.genBlock, _), [LOOP(0), LOOP(1), LOOP(2), FALSE]);
+	t.assertCorrectTraversal(t.genForLoopWithIfElseStmt(3, true, _), [LOOP(0), TRUE, FALSE, LOOP(1), TRUE, FALSE, LOOP(2), TRUE, FALSE, FALSE]);
 }
 
 

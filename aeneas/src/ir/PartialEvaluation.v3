@@ -135,11 +135,36 @@ class PartialEvaluator {
 	}
 
 	/**
+	 * Checks whether the current block is a header block of a 
+	 * loop that hasn't been evaluated yet. 
+	 */
+	def isHeaderOfNewLoop(block: SsaBlock) -> bool {
+		return (loopStack != null && 
+			!loopStack.head.hasLoopEvalStarted && 
+			headerToLoop.has(block));
+	}
+
+	/**
 	 * Iterates over the predecessors of a block to check if 
 	 * the current block is live.
 	 */
 	def arePredsDead(block: SsaBlock) -> bool {
 		var isDead = true;
+
+		// Check if the block is a loop header and we haven't traversed the loop yet
+		if (isHeaderOfNewLoop(block)) {
+			// Only consider the first pred
+			def firstPred = block.preds[0].src.block();
+			def predContext = getLatestBlockContext(firstPred);
+			if (DEBUG) {
+				def status = if(predContext.live, "live", "dead");
+				Terminal.put2("\t\tPred %d is %s\n", firstPred.uid, status);
+				Terminal.put("\t\t\tOnly checking first pred. Loop eval hasn't started\n");
+			}
+
+			return !predContext.live;
+		}
+
 		for (p in block.preds) {
 			def predBlock = p.src.block();
 			def predContext = getLatestBlockContext(predBlock);
@@ -183,7 +208,7 @@ class PartialEvaluator {
 				if (DEBUG) Terminal.put3("\tBlock %d starts live %z branch of if-stmt %d\n", block.uid, rawCond, ifStmt.uid);
 				return false;
 			}
-			if (DEBUG) Terminal.put3("\tBlock %d starts dead %z branch of if-stmt %d\n", block.uid, rawCond, ifStmt.uid);
+			if (DEBUG) Terminal.put3("\tBlock %d starts dead %z branch of if-stmt %d\n", block.uid, !rawCond, ifStmt.uid);
 			return true;
 		}
 		// SsaSwitch
@@ -235,17 +260,19 @@ class PartialEvaluator {
 				return mergeLivePredContexts(block);
 			} 
 			// Merge block is a loop header block
-			if (DEBUG) Terminal.put("\tLoop merge block\n");
-			if (!loopStack.head.hasLoopEvalStarted) {
-				// Loop body untraversed. Entering loop
-				def newContext = copyPredContext(block, 0);
-				return newContext;
+			// if (DEBUG) Terminal.put("\tLoop merge block\n");
+			// if (!loopStack.head.hasLoopEvalStarted) {
+			// 	// Loop body untraversed. Entering loop
+			// 	def newContext = copyPredContext(block, 0);
+			// 	return newContext;
 
-			}
+			// }
 			// Loop body traversed
-			def mergedContext = mergeLivePredContexts(block);
-			addNewBlockContextToMap(block, mergedContext);
-			return mergedContext;
+			// def mergedContext = mergeLivePredContexts(block);
+			// addNewBlockContextToMap(block, mergedContext);
+			def newContext = PEBlockContext.new(null);
+			addNewBlockContextToMap(block, newContext);
+			return newContext;
 		}
 		// Build context off of sole predecessor
 		def newContext = copyPredContext(block, 0);
@@ -272,6 +299,11 @@ class PartialEvaluator {
 	 * left the current loop or entered a new loop.
 	 */
 	def updateLoopStack(block: SsaBlock) {
+		// Check if block is the current loop's header
+		if (loopStack != null && headerToLoop.has(block)) {
+			def loopInfo = headerToLoop[block];
+			if (loopStack.head.info == loopInfo) return;
+		}
 		if (loopStack != null) popStaleLoopsFromStack(block);
 		// Non-header blocks cannot start new loop or iteration
 		if (!headerToLoop.has(block)) return;
@@ -312,7 +344,7 @@ class PartialEvaluator {
 	) -> SsaInstr {
 		def predBlock = block.preds[predIdx].src.block();
 		def predContext = getLatestBlockContext(predBlock);
-		def arg: SsaInstr = phi.inputs[predIdx].dest;
+		def arg = phi.inputs[predIdx].dest;
 		def optArg: SsaInstr = predContext.getOptInstr(arg);
 		return optArg;
 	}
@@ -326,10 +358,11 @@ class PartialEvaluator {
 		block: SsaBlock, 
 		blockContext: PEBlockContext
 	) {
+		if(DEBUG) Terminal.put1("evalSsaPhi %d\n", phi.uid);
 		// SsaPhi represents a loop variable
-		def curIter: LoopIterInfo = loopStack.head;
-		if (!curIter.hasLoopEvalStarted) {
+		if (isHeaderOfNewLoop(block)) {
 			// Take the first input to phi if loop not started
+			if (DEBUG) Terminal.put1("\tphi is in loop header %d of new loop\n", block.uid);
 			def optArg = getOptPhiInput(phi, block, 0);
 			blockContext.addPhi(phi, optArg);
 			return;
@@ -342,8 +375,11 @@ class PartialEvaluator {
 		def predBlocks = Arrays.map(block.preds, cfToPred);
 		def predContexts = Arrays.map(predBlocks, getLatestBlockContext);
 		def liveInputs = Vector<SsaInstr>.new();
+
+		// If block is loop header and loop in progress, skip 0th pred
+		def startIdx = if (headerToLoop.has(block), 1, 0);
 		// If predecessor block wasn't traversed, skip
-		for (i = 0; i < numInputs; i++) {
+		for (i = startIdx; i < numInputs; i++) {
 			if (!predContexts[i].live) continue;
 			def optArg = getOptPhiInput(phi, block, i);
 			liveInputs.put(optArg);
@@ -351,9 +387,11 @@ class PartialEvaluator {
 		if (liveInputs.length == 0) throwNoLivePredsFound(block);
 		// Check if all inputs end up being the same
 		if (areInstrsConstant(liveInputs)) {
+			if (DEBUG) Terminal.put("\tphi is constant\n");
 			blockContext.addPhi(phi, liveInputs[0]);
 			return;
 		}
+		if (DEBUG) Terminal.put("\tphi is not constant\n");
 		// No simplifications possible
 		blockContext.addPhi(phi, phi); 
 		// TODO: If not constant, try to extract facts
@@ -368,7 +406,9 @@ class PartialEvaluator {
 		def curBlock: SsaBlock = goto.block();
 		// Check if goto target is next in SRPO ordering
 		// If next, then push the target to the worklist
-		if (curBlock.info.srpo_num + 1 == target.info.srpo_num) {
+		def isNextSRPO = curBlock.info.srpo_num + 1 == target.info.srpo_num;
+		def isBackedge = headerToLoop.has(target);
+		if (isNextSRPO || isBackedge) {
 			worklist = List.new(target, worklist);
 			return;
 		}
@@ -379,9 +419,21 @@ class PartialEvaluator {
 	/**
 	 * Evaluate SsaIf
 	 */
-	def evalSsaIf(ifStmt: SsaIf) {
+	def evalSsaIf(ifStmt: SsaIf, blockContext: PEBlockContext) {
 		if (DEBUG) Terminal.put1("SsaIf uid: %d\n", ifStmt.uid);
 		if (DEBUG) Terminal.put2("\ttrueBlock: %d | falseBlock: %d\n", ifStmt.trueBlock().uid, ifStmt.falseBlock().uid);
+		// Loop guard
+		if (headerToLoop.has(ifStmt.block()) && blockContext.live) {
+			loopStack.head.hasLoopEvalStarted = true;
+			def cond = blockContext.getOptInstr(ifStmt.inputs[0].dest);
+			if (SsaConst.?(cond)) {
+				def rawCond = Bool.unbox(SsaConst.!(cond).val);
+				if (rawCond) worklist = List.new(ifStmt.trueBlock(), worklist);
+				else worklist = List.new(ifStmt.falseBlock(), worklist);
+				return;
+			}
+		}
+
 		worklist = List<SsaBlock>.new(ifStmt.falseBlock(), worklist);
 		worklist = List<SsaBlock>.new(ifStmt.trueBlock(), worklist);
 		if (headerToLoop.has(ifStmt.block())) {
@@ -425,7 +477,7 @@ class PartialEvaluator {
 		match (end) {
 			x: SsaReturn, 
 			x: SsaThrow => return; // TODO: how do we know when to end
-			x: SsaIf => evalSsaIf(x);
+			x: SsaIf => evalSsaIf(x, blockContext);
 			x: SsaGoto => evalSsaGoto(x);
 			_ => return;
 		}
@@ -501,6 +553,20 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 		}
 	}
 
+	def printConst(iConst: SsaConst, buf: StringBuilder) -> StringBuilder {
+		match (iConst.getType()) {
+			x: IntType => {
+				   def ival = Int.unbox(iConst.val);
+				   buf.put1(" (val=%d)", ival);
+			   }
+			x: BoolType => {
+				   def bval = Bool.unbox(iConst.val);
+				   buf.put1(" (val=%z)", bval);
+			   }
+		}
+		return buf;
+	}
+
 	def render(buf: StringBuilder) -> StringBuilder {
 		match (instr) {
 			x: SsaApplyOp => {
@@ -518,6 +584,7 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 		for (i = 0; i < inputs.length; i++) {
 			def instr = inputs[i];
 			buf.put1("uid: %d", instr.uid);
+			if (SsaConst.?(instr)) printConst(SsaConst.!(instr), buf);
 			if (i != (inputs.length - 1)) buf.puts(" | ");
 		}
 		return buf;
@@ -548,12 +615,32 @@ class PEBlockContext {
 		}
 	}
 
+	def printConst(iConst: SsaConst, buf: StringBuilder) -> StringBuilder {
+		match (iConst.getType()) {
+			x: IntType => {
+				   def ival = Int.unbox(iConst.val);
+				   buf.put1(" (val=%d)", ival);
+			   }
+			x: BoolType => {
+				   def bval = Bool.unbox(iConst.val);
+				   buf.put1(" (val=%z)", bval);
+			   }
+		}
+		return buf;
+	}
+
 	def render(buf: StringBuilder) -> StringBuilder {
 		buf.puts("\topt info map:\n");
 		def keyList: List<OptMapKey> = Maps.keyList(optMap);
 		for (l = keyList; l != null; l = l.tail) {
 			def key = l.head;
-			buf.put2("\t\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
+			if (SsaConst.?(optMap[key])) {
+				buf.put2("\t\t(%q)   ->    uid %d", key.render, optMap[key].uid);
+				printConst(SsaConst.!(optMap[key]), buf);
+				buf.ln();
+			} else {
+				buf.put2("\t\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
+			}
 		}
 		buf.puts("\tend of map\n");
 		buf.put1("\tblock liveness: %z\n", live);
@@ -602,16 +689,12 @@ class PEBlockContext {
 		// Update map with instruction -> optimize instruction pairings
 		// to increase chance of opt map hits
 		optMap[origKey] = reducedInstr;
-		optMap[optArgsKey] = reducedInstr;
-		if (!SsaConst.?(reducedInstr)) {
-			def reducedKey: OptMapKey = instrToOptMapKey(reducedInstr);
-			optMap[reducedKey] = reducedInstr;
-		}
 		return reducedInstr;
 	}
 
 	def addPhi(phi: SsaPhi, cur: SsaInstr) {
 		def key: OptMapKey = instrToOptMapKey(phi);
+		Terminal.put3( "uid %d : (%q)   ->   uid %d\n", phi.uid, key.render, cur.uid);
 		optMap[key] = cur;
 	}
 
@@ -641,11 +724,7 @@ class PEBlockContext {
 	def getOptInstr(i: SsaInstr) -> SsaInstr {
 		Terminal.put1("getOptInstr uid: %d\n", i.uid);
 		if (SsaConst.?(i)) return i;
-		var instr = i;
-		if (SsaApplyOp.?(i)) {
-			instr = optimizeArgs(SsaApplyOp.!(i));
-		}
-		def key = instrToOptMapKey(instr);
+		def key = instrToOptMapKey(i);
 		Terminal.put1("\tkey: (%q)\n", key.render);
 		if (!optMap.has(key)) return null;
 		return optMap[key];
