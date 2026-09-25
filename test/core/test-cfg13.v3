@@ -1,0 +1,14 @@
+//@execute 0=10
+def main(a: int) -> int {
+	var x = 0;
+	for (i < 10) {
+		x += 1;
+		if (x % 10 == 9) {
+			return 10;
+		} else if (x % 10 == 8) {
+			x += 12;
+		}
+	}
+	return x;
+
+}
