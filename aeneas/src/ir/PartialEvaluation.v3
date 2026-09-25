@@ -44,8 +44,10 @@ class PartialEvaluator {
 	 * Returns the most recent context created for a block
 	 */
 	def getLatestBlockContext(block: SsaBlock) -> PEBlockContext {
+		if (DEBUG) Terminal.put1("[getLatestBlockContext] Latest context for block: %d\n", block.uid);
 		if (!blockContextsMap.has(block)) return null;
 		def contextList = blockContextsMap[block];
+		if (DEBUG && contextList != null) Terminal.put1("%q\n", contextList.head.render);
 		return if (contextList == null, null, contextList.head);
 	}
 
@@ -53,23 +55,29 @@ class PartialEvaluator {
 	 * Adds a new block context for the block
 	 */
 	def addNewBlockContextToMap(block: SsaBlock, newContext: PEBlockContext) {
+		if (DEBUG) {
+			Terminal.put1("[addNewBlockContext] New context for block: %d\n", block.uid);
+			Terminal.put1("%q\n", newContext.render);
+		}
 		def oldContextList = blockContextsMap[block];
 		blockContextsMap[block] = List.new(newContext, oldContextList);
 	}
 
 	def intersect(
-		m1: PartialMap<OptMapKey, SsaInstr>, 
-		m2: PartialMap<OptMapKey, SsaInstr>
-	) -> PartialMap<OptMapKey, SsaInstr> {
+		m1: HashMap<OptMapKey, SsaInstr>, 
+		m2: HashMap<OptMapKey, SsaInstr>
+	) -> HashMap<OptMapKey, SsaInstr> {
+		if (DEBUG) Terminal.put("[intersect]\n");
 		def keys1 = Maps.keyList(m1);
 		def keys2 = Maps.keyList(m2);
-		if (keys1 == null) return m2;
-		if (keys2 == null) return m1;
+		if (keys1 == null) return Maps.copy(m1);
+		if (keys2 == null) return Maps.copy(m2);
 		def keys = if(Lists.length(keys1) < Lists.length(keys2), keys1, keys2);
 		def newMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.equals);
 		for (l = keys; l != null; l = l.tail) {
 			def k = l.head;
 			def bothHaveKey = m1.has(k) && m2.has(k);
+			if (DEBUG) Terminal.put2("\tBoth have key %q? %z\n", k.render, bothHaveKey);
 			if (!bothHaveKey) continue;
 			def m1Val = m1[k];
 			def m2Val = m2[k];
@@ -87,12 +95,13 @@ class PartialEvaluator {
 	}
 
 	def mergeContexts(preds: Array<SsaBlock>) -> PEBlockContext {
+		Terminal.put1("[mergeContexts] preds length: %d\n", preds.length);
 		if (preds.length == 0) return null;
 		def predContext = getLatestBlockContext(preds[0]);
 		if (predContext == null) throwNoContextsFound(preds[0]);
 		if (preds.length == 1) return PEBlockContext.new(predContext);
 
-		var resultMap: PartialMap<OptMapKey, SsaInstr> = predContext.optMap;
+		var resultMap: HashMap<OptMapKey, SsaInstr> = predContext.optMap;
 		for (i = 1; i < preds.length; i++) {
 			def context = getLatestBlockContext(preds[i]);
 			if (context == null) throwNoContextsFound(preds[i]);
@@ -113,10 +122,17 @@ class PartialEvaluator {
 		def cfToBlock = fun (cf: SsaCfEdge) => cf.src.block();
 		def allPredBlocks = Arrays.map(block.preds, cfToBlock);
 		def cond = fun (b: SsaBlock) => getLatestBlockContext(b).live;
+
+		if (DEBUG) {
+			Terminal.put1("[mergeLivePredContexts] Merging for block %d\n", block.uid);
+			for (p in allPredBlocks) {
+				Terminal.put2("\tpred %d | live? %z\n", p.uid, cond(p));
+			}
+		}
+
 		def livePreds = Arrays.filter(allPredBlocks, cond);
 		if (livePreds.length == 0) throwNoLivePredsFound(block);
 		def mergedContext = mergeContexts(livePreds);
-		addNewBlockContextToMap(block, mergedContext);
 		return mergedContext;
 	}
 
@@ -130,7 +146,6 @@ class PartialEvaluator {
 		def latestPredContext = getLatestBlockContext(pred);
 		if (latestPredContext == null) throwNoContextsFound(pred);
 		def newContext = PEBlockContext.new(latestPredContext);
-		addNewBlockContextToMap(block, newContext);
 		return newContext;
 	}
 
@@ -257,25 +272,29 @@ class PartialEvaluator {
 			if (!headerToLoop.has(block)) {
 				// Not a loop merge block
 				if (DEBUG) Terminal.put("\tNot loop merge block\n");
-				return mergeLivePredContexts(block);
+				def newContext = mergeLivePredContexts(block);
+				addNewBlockContextToMap(block, newContext);
+				return newContext;
 			} 
 			// Merge block is a loop header block
 			// if (DEBUG) Terminal.put("\tLoop merge block\n");
-			// if (!loopStack.head.hasLoopEvalStarted) {
-			// 	// Loop body untraversed. Entering loop
-			// 	def newContext = copyPredContext(block, 0);
-			// 	return newContext;
+			if (!loopStack.head.hasLoopEvalStarted) {
+				// Loop body untraversed. Entering loop
+				def newContext = copyPredContext(block, 0);
+				addNewBlockContextToMap(block, newContext);
+				return newContext;
 
-			// }
+			}
 			// Loop body traversed
-			// def mergedContext = mergeLivePredContexts(block);
-			// addNewBlockContextToMap(block, mergedContext);
-			def newContext = PEBlockContext.new(null);
+			// Merge the parent preheader context with the 
+			// previous live context
+			def newContext = mergeLivePredContexts(block);
 			addNewBlockContextToMap(block, newContext);
 			return newContext;
 		}
 		// Build context off of sole predecessor
 		def newContext = copyPredContext(block, 0);
+		addNewBlockContextToMap(block, newContext);
 		return newContext;
 	}
 
@@ -349,6 +368,19 @@ class PartialEvaluator {
 		return optArg;
 	}
 
+	def printConst(iConst: SsaConst, buf: StringBuilder) -> StringBuilder {
+		match (iConst.getType()) {
+			x: IntType => {
+				   def ival = Int.unbox(iConst.val);
+				   buf.put1(" (val=%d)", ival);
+			   }
+			x: BoolType => {
+				   def bval = Bool.unbox(iConst.val);
+				   buf.put1(" (val=%z)", bval);
+			   }
+		}
+		return buf;
+	}
 
 	/**
 	 * Evaluate SsaPhi in non-loop header 

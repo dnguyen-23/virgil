@@ -82,6 +82,10 @@ class MockedPartialEvaluator extends PartialEvaluator {
 					def msg = Strings.format2("Expected traversal of %z branch but %z branch was explored instead.", expectedBranch, curBranch);
 					t.fail(msg);
 				}
+				// Check if exiting a loop. Reset iter count if so
+				if (assertHelpers.headerToBackedge.has(pred) && !expectedBranch) {
+					headerToIter.remove(pred);
+				}
 			}
 			ForILoop => {
 				Terminal.put("Tester: Expecting For loop branch traversal\n");
@@ -414,6 +418,16 @@ class PartialEvaluatorTester(t: Tester) {
 		return genForLoop(numIter, nestedIf, curBlock);
 	}
 
+	def genForLoopWithForLoop(
+		numIterOuter: int,
+		numIterInner: int,
+		curBlock: SsaBlock
+	) -> SsaBlock {
+		def nestedLoop = genForLoop(numIterInner, genBlock, _);
+		return genForLoop(numIterOuter, nestedLoop, curBlock);
+	}
+		
+
 	def genBlock(curBlock: SsaBlock) -> SsaBlock { 
 		builder.set(curBlock);
 		return curBlock;
@@ -452,6 +466,7 @@ def testIfElseStmt(t: PartialEvaluatorTester) {
 def testForLoop(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(t.genForLoop(3, t.genBlock, _), [LOOP(0), LOOP(1), LOOP(2), FALSE]);
 	t.assertCorrectTraversal(t.genForLoopWithIfElseStmt(3, true, _), [LOOP(0), TRUE, FALSE, LOOP(1), TRUE, FALSE, LOOP(2), TRUE, FALSE, FALSE]);
+	t.assertCorrectTraversal(t.genForLoopWithForLoop(2, 3, _), [LOOP(0), LOOP(0), LOOP(1), LOOP(2), FALSE, LOOP(1), LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE]);
 }
 
 
