@@ -37,6 +37,7 @@ class PartialEvaluator {
 		if (ordering.length == 0) return;
 		worklist = Lists.cons1<SsaBlock>(ordering[0]);
 		while (worklist != null) evalSsaBlock();
+		if (DEBUG) Terminal.put("Finished partial evaluation\n\n");
 	}
 
 	/**
@@ -134,6 +135,76 @@ class PartialEvaluator {
 	}
 
 	/**
+	 * Iterates over the predecessors of a block to check if 
+	 * the current block is live.
+	 */
+	def arePredsDead(block: SsaBlock) -> bool {
+		var isDead = true;
+		for (p in block.preds) {
+			def predBlock = p.src.block();
+			def predContext = getLatestBlockContext(predBlock);
+			if (predContext.live) isDead = false;
+			if (DEBUG) {
+				def status = if(predContext.live, "live", "dead");
+				Terminal.put2("\t\tPred %d is %s\n", predBlock.uid, status);
+			}
+		}
+		if (DEBUG) {
+			def status = if(!isDead, "live", "dead");
+			Terminal.put2("\tBlock %d is %s\n", block.uid, status);
+		}
+		return isDead;
+	}
+
+	/**
+	 * Checks if the current block is the start block of a dead branch
+	 * for a branching instruction.
+	 */
+	def startsDeadBranch(block: SsaBlock) -> bool {
+		if (block.preds.length != 1 &&
+		   !SsaIf.?(block.preds[0].src) && 
+		   !SsaSwitch.?(block.preds[0].src)) {
+			return false;
+		}
+		// Check the condition
+		def predEnd = block.preds[0].src;
+		def origCond = predEnd.inputs[0].dest;
+		def predContext = getLatestBlockContext(predEnd.block());
+		def cond = predContext.getOptInstr(origCond);
+		if (SsaIf.?(predEnd)) {
+			def ifStmt = SsaIf.!(predEnd);
+			if (!SsaConst.?(cond)) {
+				if (DEBUG) Terminal.put2("\tBlock %d starts var condition branch of if-stmt %d\n", block.uid, ifStmt.uid);
+				return false;
+			}
+			def rawCond = Bool.unbox(SsaConst.!(cond).val);
+			if ((rawCond && block == ifStmt.trueBlock()) ||
+			    (!rawCond && block == ifStmt.falseBlock())) {
+				if (DEBUG) Terminal.put3("\tBlock %d starts live %z branch of if-stmt %d\n", block.uid, rawCond, ifStmt.uid);
+				return false;
+			}
+			if (DEBUG) Terminal.put3("\tBlock %d starts dead %z branch of if-stmt %d\n", block.uid, rawCond, ifStmt.uid);
+			return true;
+		}
+		// SsaSwitch
+		def switchStmt = SsaSwitch.!(predEnd);
+		if (!SsaConst.?(cond)) {
+			if (DEBUG) Terminal.put2("\tBlock %d starts var condition branch of switch-stmt %d\n", block.uid, switchStmt.uid);
+			return false;
+		}
+		// TODO: case on switches of different types
+		if (cond.getType() != Int.TYPE) return false;
+		def rawCond = Int.unbox(SsaConst.!(cond).val);
+		def liveSuccBlock = switchStmt.succs[rawCond].dest;
+		if (block == liveSuccBlock) {
+			if (DEBUG) Terminal.put3("\tBlock %d starts live %d branch of if-stmt %d\n", block.uid, rawCond, switchStmt.uid);
+			return false;
+		}
+		if (DEBUG) Terminal.put3("\tBlock %d starts dead %d branch of if-stmt %d\n", block.uid, rawCond, switchStmt.uid);
+		return true;
+	}
+
+	/**
 	 * Creates a block context for the block given information about it.
 	 */
 	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
@@ -145,6 +216,17 @@ class PartialEvaluator {
 			addNewBlockContextToMap(block, newContext);
 			return newContext;
 		}
+
+		// Check whether the block is live or dead
+		if (DEBUG) Terminal.put1("\tChecking if block %d is live:\n", block.uid);
+		if (arePredsDead(block) || startsDeadBranch(block)) {
+			def newContext = PEBlockContext.new(null);
+			newContext.live = false;
+			addNewBlockContextToMap(block, newContext);
+			return newContext;
+		}
+
+
 		if (block.preds.length > 1) {
 			// Merge block
 			if (!headerToLoop.has(block)) {
@@ -297,37 +379,14 @@ class PartialEvaluator {
 	/**
 	 * Evaluate SsaIf
 	 */
-	def evalSsaIf(ifStmt: SsaIf, blockContext: PEBlockContext) {
+	def evalSsaIf(ifStmt: SsaIf) {
 		if (DEBUG) Terminal.put1("SsaIf uid: %d\n", ifStmt.uid);
-		// Case on whether the condition is variable or constant
-		var condInstr = ifStmt.input0();
-		if(SsaApplyOp.?(ifStmt.input0())) {
-			condInstr = blockContext.getOptInstr(SsaApplyOp.!(condInstr));
-			if (condInstr == null) throwOptInstrNotFound(ifStmt.input0());
-		}
-
-		if (SsaConst.?(condInstr)) { // Condition is constant
-			def constCond = SsaConst.!(condInstr);
-			def rawCond = Bool.unbox(constCond.val);
-			def nextBlock = if(rawCond, ifStmt.trueBlock(), ifStmt.falseBlock());
-			if (DEBUG) Terminal.put1("\tConstant condition: %z\n", rawCond);
-			worklist = List<SsaBlock>.new(nextBlock, worklist);
-
-			// If block is loop header and condition true, then
-			// set loop eval in progress
-			def curBlock = ifStmt.block();
-			if (headerToLoop.has(curBlock)) {
-				loopStack.head.hasLoopEvalStarted = rawCond;
-			} 
-			return;
-		} 
-
-		// Condition is variable 
-		if (DEBUG) Terminal.put2("\tVar condition | trueBlock: %d | falseBlock: %d\n", ifStmt.trueBlock().uid, ifStmt.falseBlock().uid);
+		if (DEBUG) Terminal.put2("\ttrueBlock: %d | falseBlock: %d\n", ifStmt.trueBlock().uid, ifStmt.falseBlock().uid);
 		worklist = List<SsaBlock>.new(ifStmt.falseBlock(), worklist);
 		worklist = List<SsaBlock>.new(ifStmt.trueBlock(), worklist);
-		// Indicate loop eval in progress
-		loopStack.head.hasLoopEvalStarted = true;
+		if (headerToLoop.has(ifStmt.block())) {
+			loopStack.head.hasLoopEvalStarted = true;
+		}
 	}
 	
 	/**
@@ -341,7 +400,14 @@ class PartialEvaluator {
 		// TODO: identifiers for reusing contexts
 		def blockContext = createContextForBlock(block);
 		worklist = worklist.tail;
-		if (DEBUG) Terminal.put1("evalSsaBlock uid: %d\n", block.uid);
+
+		// Skip to the end if the context is dead
+		if (!blockContext.live) {
+			evalSsaEnd(block.end(), blockContext);
+			return;
+		}
+
+		if (DEBUG) Terminal.put1("\nevalSsaBlock uid: %d\n", block.uid);
 		for (instr = block.next; instr != block; instr = instr.next) {
 			match (instr) {
 				x: SsaApplyOp => blockContext.addApplyOp(x, instrReducer);
@@ -349,6 +415,7 @@ class PartialEvaluator {
 				x: SsaEnd => evalSsaEnd(x, blockContext); 
 			}
 		}
+		if (DEBUG) Terminal.put2("\tContext for block %d:\n%q\n", block.uid, blockContext.render);
 		return;
 	}
 
@@ -358,7 +425,7 @@ class PartialEvaluator {
 		match (end) {
 			x: SsaReturn, 
 			x: SsaThrow => return; // TODO: how do we know when to end
-			x: SsaIf => evalSsaIf(x, blockContext);
+			x: SsaIf => evalSsaIf(x);
 			x: SsaGoto => evalSsaGoto(x);
 			_ => return;
 		}
@@ -489,6 +556,7 @@ class PEBlockContext {
 			buf.put2("\t\t(%q)   ->    uid %d\n", key.render, optMap[key].uid);
 		}
 		buf.puts("\tend of map\n");
+		buf.put1("\tblock liveness: %z\n", live);
 		return buf;
 	}
 	
@@ -530,13 +598,15 @@ class PEBlockContext {
 		def iWithOptArgs = optimizeArgs(i);
 		def reducedInstr = instrReducer.reduceApplyOp(iWithOptArgs);
 		def optArgsKey: OptMapKey = instrToOptMapKey(iWithOptArgs);
-		def reducedKey: OptMapKey = instrToOptMapKey(reducedInstr);
 		Terminal.put3( "uid %d : (%q)   ->   uid %d\n", i.uid, origKey.render, reducedInstr.uid);
 		// Update map with instruction -> optimize instruction pairings
 		// to increase chance of opt map hits
 		optMap[origKey] = reducedInstr;
 		optMap[optArgsKey] = reducedInstr;
-		optMap[reducedKey] = reducedInstr;
+		if (!SsaConst.?(reducedInstr)) {
+			def reducedKey: OptMapKey = instrToOptMapKey(reducedInstr);
+			optMap[reducedKey] = reducedInstr;
+		}
 		return reducedInstr;
 	}
 
