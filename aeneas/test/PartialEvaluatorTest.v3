@@ -427,6 +427,14 @@ class PartialEvaluatorTester(t: Tester) {
 		return genForLoop(numIterOuter, nestedLoop, curBlock);
 	}
 		
+	def genIfElseWithForLoops(
+		cond: bool,
+		numIter: int,
+		curBlock: SsaBlock
+	) -> SsaBlock {
+		def genLoop = genForLoop(numIter, genBlock, _);
+		return genIfElseConstStmt(cond, genLoop, genLoop, curBlock);
+	}
 
 	def genBlock(curBlock: SsaBlock) -> SsaBlock { 
 		builder.set(curBlock);
@@ -467,6 +475,8 @@ def testForLoop(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(t.genForLoop(3, t.genBlock, _), [LOOP(0), LOOP(1), LOOP(2), FALSE]);
 	t.assertCorrectTraversal(t.genForLoopWithIfElseStmt(3, true, _), [LOOP(0), TRUE, FALSE, LOOP(1), TRUE, FALSE, LOOP(2), TRUE, FALSE, FALSE]);
 	t.assertCorrectTraversal(t.genForLoopWithForLoop(2, 3, _), [LOOP(0), LOOP(0), LOOP(1), LOOP(2), FALSE, LOOP(1), LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE]);
+	t.assertCorrectTraversal(t.genIfElseWithForLoops(true, 3, _), [TRUE, LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE, LOOP(0), FALSE]);
+	t.assertCorrectTraversal(t.genIfElseWithForLoops(false, 3, _), [TRUE, LOOP(0), FALSE, FALSE, LOOP(0), LOOP(1), LOOP(2), FALSE]);
 }
 
 

@@ -352,6 +352,7 @@ class PartialEvaluator {
 		// SsaPhi represents a loop variable
 		if (isHeaderOfNewLoop(block)) {
 			// Take the first input to phi if loop not started
+			// TODO: there can be multiple non loop predecessors
 			def optArg = getOptPhiInput(phi, block, 0);
 			blockContext.addPhi(phi, optArg);
 			return;
@@ -417,6 +418,17 @@ class PartialEvaluator {
 				else worklist = List.new(ifStmt.falseBlock(), worklist);
 				return;
 			}
+		} else if (headerToLoop.has(ifStmt.block()) && !blockContext.live) {
+			def curLoop = loopStack.head;
+			// If the loop is dead, we evaluate it once
+			// to propagate info on which blocks are dead
+			if (curLoop.hasLoopEvalStarted) {
+				worklist = List.new(ifStmt.falseBlock(), worklist);
+			} else {
+				curLoop.hasLoopEvalStarted = true;
+				worklist = List.new(ifStmt.trueBlock(), worklist);
+			}
+			return;
 		}
 
 		worklist = List<SsaBlock>.new(ifStmt.falseBlock(), worklist);
@@ -487,20 +499,20 @@ class PartialEvaluator {
 		def blockContext = createContextForBlock(block);
 		worklist = worklist.tail;
 
+		if (DEBUG) putBlock(block);
+
 		// Skip to the end if the context is dead
 		if (!blockContext.live) {
 			evalSsaEnd(block.end(), blockContext);
+			if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer);
 			return;
 		}
 
-		if (DEBUG) putBlock(block);
 		for (link = block.next; link != block; link = link.next) {
 			match (link) {
 				x: SsaApplyOp => blockContext.addApplyOp(x, instrReducer);
 				x: SsaPhi => evalSsaPhi(x, block, blockContext);
-				x: SsaEnd => {
-					   evalSsaEnd(x, blockContext); 
-				   }
+				x: SsaEnd => evalSsaEnd(x, blockContext); 
 			}
 			if (DEBUG && SsaInstr.?(link)) putInstr(SsaInstr.!(link), blockContext);
 		}
@@ -582,6 +594,7 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 			x: SsaApplyOp => {
 				if (!SsaApplyOp.?(this.instr)) return false;
 				if (x.op != SsaApplyOp.!(this.instr).op) return false;
+				// TODO: take care of commutative operations
 				return  Arrays.allTrue(this.inputs, that.inputs, SsaInstr.==);
 			   }
 			x: SsaParam,
@@ -684,11 +697,15 @@ class PEBlockContext {
 		buf.yellow().puts("}").end();
 		buf.ln();
 		buf.ln();
+		buf.outt();
 	}
 	
 	def instrToOptMapKey(instr: SsaInstr) -> OptMapKey {
 		def dfEdges = instr.inputs;
 		def args = Arrays.map(dfEdges, SsaDfEdge.dest);
+		// TODO: Only need to pass in instruction
+		// Need entire instruction for phi case
+		// Apply op case onlyneeds args
 		return OptMapKey(instr, args);
 	}
 
@@ -736,6 +753,8 @@ class PEBlockContext {
 	def throwOptInstrNotFound(i: SsaInstr) {
 		def msg = Strings.format1("Instruction %d not found in block context\n", i.uid);
 		System.error("PartialEvaluationFailedException", msg);
+		// TODO: Modify SsaContext
+		// shouldn't be system.error
 	}
 	/**
 	 * Mapping function over the list of dfEdges for an instruction.
