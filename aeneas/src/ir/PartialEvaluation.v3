@@ -10,6 +10,8 @@
 class PartialEvaluator {
 	// ----------------- Constants -----------------
 	def DEBUG = true;
+	def DEBUG_CTX = false;
+	def DEBUG_INSTR = false;
 	// ----------------- Helpers -----------------
 	def blockOrder: SsaBlockOrder;
 	def instrReducer: SsaInstrReducer;
@@ -173,8 +175,8 @@ class PartialEvaluator {
 	}
 
 	/**
-	 * Checks if the current block is the start block of a dead branch
-	 * for a branching instruction.
+	 * Checks if the first block on a branch is part of a dead branch
+	 * or a live branch.
 	 */
 	def startsDeadBranch(block: SsaBlock) -> bool {
 		if (block.preds.length != 1 &&
@@ -184,7 +186,7 @@ class PartialEvaluator {
 		}
 		// Check the condition
 		def predEnd = block.preds[0].src;
-		def origCond = predEnd.inputs[0].dest;
+		def origCond = predEnd.input0();
 		def predContext = getLatestBlockContext(predEnd.block());
 		def cond = predContext.getOptInstr(origCond);
 		if (SsaIf.?(predEnd)) {
@@ -200,11 +202,10 @@ class PartialEvaluator {
 		// SsaSwitch
 		def switchStmt = SsaSwitch.!(predEnd);
 		if (!SsaConst.?(cond)) return false;
-		// TODO: case on switches of different types
-		if (cond.getType() != Int.TYPE) return false;
-		def rawCond = Int.unbox(SsaConst.!(cond).val);
-		def liveSuccBlock = switchStmt.succs[rawCond].dest;
-		return block != liveSuccBlock;
+		def constCond = SsaConst.!(cond);
+		def liveCf = switchStmt.findSucc(constCond.val);
+		// Dead branch is one that doesn't match live control flow 
+		return liveCf.dest != block;
 	}
 
 	/**
@@ -226,33 +227,35 @@ class PartialEvaluator {
 			return newContext;
 		}
 
-
-		if (block.preds.length > 1) {
-			// Merge block
-			if (!headerToLoop.has(block)) {
-				// Not a loop merge block
-				def newContext = mergeLivePredContexts(block);
-				addNewBlockContextToMap(block, newContext);
-				return newContext;
-			} 
-			// Merge block is a loop header block
-			// if (DEBUG) Terminal.put("\tLoop merge block\n");
-			if (!loopStack.head.hasLoopEvalStarted) {
-				// Loop body untraversed. Entering loop
-				def newContext = copyPredContext(block, 0);
-				addNewBlockContextToMap(block, newContext);
-				return newContext;
-
-			}
-			// Loop body traversed
-			// Merge the parent preheader context with the 
-			// previous live context
-			def newContext = mergeLivePredContexts(block);
+		if (block.preds.length == 1) {
+			// Build context off of sole predecessor
+			def newContext = copyPredContext(block, 0);
 			addNewBlockContextToMap(block, newContext);
 			return newContext;
 		}
-		// Build context off of sole predecessor
-		def newContext = copyPredContext(block, 0);
+
+		
+		// Merge block: Evaluating blocks with more than 1 pred
+
+		if (!headerToLoop.has(block)) {
+			// Not a loop merge block
+			def newContext = mergeLivePredContexts(block);
+			addNewBlockContextToMap(block, newContext);
+			return newContext;
+		} 
+		// Merge block is a loop header block
+		// if (DEBUG) Terminal.put("\tLoop merge block\n");
+		if (!loopStack.head.hasLoopEvalStarted) {
+			// Loop body untraversed. Entering loop
+			def newContext = copyPredContext(block, 0);
+			addNewBlockContextToMap(block, newContext);
+			return newContext;
+
+		}
+		// Loop body traversed
+		// Merge the parent preheader context with the 
+		// previous live context
+		def newContext = mergeLivePredContexts(block);
 		addNewBlockContextToMap(block, newContext);
 		return newContext;
 	}
@@ -411,7 +414,7 @@ class PartialEvaluator {
 		// Loop guard
 		if (headerToLoop.has(ifStmt.block()) && blockContext.live) {
 			loopStack.head.hasLoopEvalStarted = true;
-			def cond = blockContext.getOptInstr(ifStmt.inputs[0].dest);
+			def cond = blockContext.getOptInstr(ifStmt.input0());
 			if (SsaConst.?(cond)) {
 				def rawCond = Bool.unbox(SsaConst.!(cond).val);
 				if (rawCond) worklist = List.new(ifStmt.trueBlock(), worklist);
@@ -435,6 +438,17 @@ class PartialEvaluator {
 		worklist = List<SsaBlock>.new(ifStmt.trueBlock(), worklist);
 		if (headerToLoop.has(ifStmt.block())) {
 			loopStack.head.hasLoopEvalStarted = true;
+		}
+	}
+
+	/**
+	 * Evaluate SsaSwitch
+	 */
+	def evalSsaSwitch(switch: SsaSwitch, blockContext: PEBlockContext) {
+		// Push branches into worklist
+		for (i = switch.succs.length - 1; i >= 0; i--) {
+			def succ = switch.succs[i].dest;
+			worklist = List.new(succ, worklist);
 		}
 	}
 
@@ -468,6 +482,7 @@ class PartialEvaluator {
 	}
 
 	def putInstr(instr: SsaInstr, blockContext: PEBlockContext) {
+		if (!DEBUG_INSTR) return;
 		match (instr) {
 			x: SsaPhi,
 			x: SsaApplyOp => {
@@ -504,7 +519,7 @@ class PartialEvaluator {
 		// Skip to the end if the context is dead
 		if (!blockContext.live) {
 			evalSsaEnd(block.end(), blockContext);
-			if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer);
+			if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer, DEBUG_CTX);
 			return;
 		}
 
@@ -516,7 +531,7 @@ class PartialEvaluator {
 			}
 			if (DEBUG && SsaInstr.?(link)) putInstr(SsaInstr.!(link), blockContext);
 		}
-		if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer);
+		if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer, DEBUG_CTX);
 		return;
 	}
 
@@ -528,6 +543,7 @@ class PartialEvaluator {
 			x: SsaThrow => return; // TODO: how do we know when to end
 			x: SsaIf => evalSsaIf(x, blockContext);
 			x: SsaGoto => evalSsaGoto(x);
+			x: SsaSwitch => evalSsaSwitch(x, blockContext);
 			_ => return;
 		}
 	}
@@ -679,7 +695,8 @@ class PEBlockContext {
 		return buf;
 	}
 
-	def printContext(numIndents: int, printer: SsaPrinter) {
+	def printContext(numIndents: int, printer: SsaPrinter, DEBUG_CTX: bool) {
+		if (!DEBUG_CTX) return;
 		def buf = printer.buf;
 		for (i < numIndents) buf.putc('\t');
 		buf.yellow().puts("Context {").end().ln();

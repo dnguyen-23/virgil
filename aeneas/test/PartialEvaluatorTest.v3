@@ -2,6 +2,7 @@ def T = UnitTests.registerT("partial evaluation:", _, PartialEvaluatorTester.new
 def X = [
 	T("if-else stmt", testIfElseStmt),
 	T("for loop", testForLoop),
+	T("switch", testSwitch),
 	// T("single block/straight line code", testStraightLineConst),
 	// T("single if-stmt constant true", testSingleTrueConst),
 	// T("single if-stmt constant false", testSingleFalseConst),
@@ -56,22 +57,15 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		return expectedChoice;
 	}
 
-	def assertCorrectPathChoice(curBlock: SsaBlock) {
-		if (curBlock.preds.length != 1) return;
-		def predEnd: SsaEnd = curBlock.preds[0].src;
-		def pred: SsaBlock = predEnd.block();
-		// Statically constant condition and not a backedge
-		if (SsaGoto.?(predEnd)) {
-			// CFG always has direct goto to update block in loop
-			// TODO: what about for while loops?
-			def isLoopUpdateBlock = SsaGoto.?(curBlock.end()) && assertHelpers.isLoopHeader(SsaGoto.!(curBlock.end()).target());
-			if (!isLoopUpdateBlock) expectedPath = expectedPath.tail; 
-			return;
-			
-		}
-		if (!SsaIf.?(predEnd)) return;
-		def ifInstr = SsaIf.!(pred.end());
-		def expected: PathType = popFromExpectedPath();	
+
+	def expectedIfBranchMatchesTraversed(
+		ifInstr: SsaIf, 
+		curBlock: SsaBlock,
+		expected: PathType
+	) {
+		def pred = ifInstr.block();
+		def depth = Lists.length(loopStack);
+		for (i < depth) Terminal.put("\t");
 		match (expected) {
 			IfBranch => {
 				Terminal.put("Tester: Expecting If branch traversal\n");
@@ -106,7 +100,55 @@ class MockedPartialEvaluator extends PartialEvaluator {
 					t.fail(msg);
 				}
 			}
+			SwitchCase => {
+				def msg = "Expected traversal of switch case but traversing if-stmt";
+				t.fail(msg);
+			}
 		}
+	}
+
+	def expectedSwitchBranchMatchesTraversed(
+		switchInstr: SsaSwitch,
+		curBlock: SsaBlock,
+		expected: PathType
+	) {
+		if (!PathType.SwitchCase.?(expected)) {
+			def msg = "Unexpected traversal of switch branch";
+			t.fail(msg);
+		}
+		def expectedCond = PathType.SwitchCase.!(expected).v;
+		def expectedSucc = switchInstr.findSucc(expectedCond).dest;
+		if (expectedSucc == curBlock) return;
+
+		// Failure: Determine which branch curBlock starts
+		def intExpectedCond = Int.unbox(expectedCond);
+		for (i = 0; i < switchInstr.succs.length; i++) {
+			def succI = switchInstr.succs[i].dest;
+			if (succI == curBlock) {
+				def msg = Strings.format3("Expected traversal of switch case %d but traversed case %d instead at block %d", intExpectedCond, i, curBlock.uid);
+				t.fail(msg);
+				return;
+			}
+		}
+		def msg = Strings.format2("Expected traversal of switch case %d but current block %d is not part of a switch case", intExpectedCond, curBlock.uid);
+		t.fail(msg);
+	}
+
+	def assertCorrectPathChoice(curBlock: SsaBlock) {
+		if (curBlock.preds.length != 1) return;
+		def predEnd: SsaEnd = curBlock.preds[0].src;
+		def pred: SsaBlock = predEnd.block();
+		match (predEnd) {
+			x: SsaIf => {
+				def expected: PathType = popFromExpectedPath();	
+				expectedIfBranchMatchesTraversed(x, curBlock, expected);
+			   }
+			x: SsaSwitch => {
+				def expected: PathType = popFromExpectedPath();	
+				expectedSwitchBranchMatchesTraversed(x, curBlock, expected);
+			   }
+		}
+
 
 	}
 }
@@ -130,6 +172,7 @@ type CFGSpecsToGraphOutput(
 type PathType {
 	case IfBranch(branch: bool);
 	case ForILoop(i: int);
+	case SwitchCase(v: Val);
 }
 
 // Objects that help with the assertion we need to make
@@ -201,9 +244,15 @@ class PartialEvaluatorTester(t: Tester) {
 		if (condInstrs == null || condInstrs.length == 0) {
 			t.fail("Unable to create condition instruction.");
 		}
+		if (curBlock == null) {
+			t.fail("Start block is null");
+		}
 
 		builder.set(curBlock);
-		for (i in condInstrs) builder.append(i);
+		for (i in condInstrs) {
+			if (SsaConst.?(i)) continue;
+			builder.append(i);
+		}
 	
 		def cond = condInstrs[condInstrs.length - 1];
 
@@ -220,8 +269,12 @@ class PartialEvaluatorTester(t: Tester) {
 		// switch creation automatically adds 2
 		def maxValue = numBranches - 2;
 		def switch = SsaSwitch.new(keyType, maxValue, cond);
+		for (i < switch.succs.length) {
+			switch.succs[i] = SsaCfEdge.new(switch, SsaBlock.new());
+		}
 		builder.append(switch);
 		def succs = Arrays.map(switch.succs, SsaCfEdge.dest);
+
 		return succs;
 	}
 
@@ -436,6 +489,22 @@ class PartialEvaluatorTester(t: Tester) {
 		return genIfElseConstStmt(cond, genLoop, genLoop, curBlock);
 	}
 
+	def genSwitch(
+		cond: int, 
+		branchFuncs: Array<SsaBlock -> SsaBlock>,
+		curBlock: SsaBlock
+	) -> SsaBlock {
+		def endBlocks = Array<SsaBlock>.new(branchFuncs.length);
+		def intCond = graph.intConst(cond);
+		def numBranches = branchFuncs.length;
+		def branchStarts = branch(curBlock, numBranches, [intCond]);
+		for (i = 0; i < numBranches; i++) {
+			endBlocks[i] = branchFuncs[i](branchStarts[i]);
+		}
+		def mergeBlock = merge([endBlocks])[0];
+		return mergeBlock;
+	}
+
 	def genBlock(curBlock: SsaBlock) -> SsaBlock { 
 		builder.set(curBlock);
 		return curBlock;
@@ -465,6 +534,7 @@ type TestParams(boolParams: Array<SsaParam>, intParams: Array<SsaParam>){
 def TRUE = PathType.IfBranch(true);
 def FALSE = PathType.IfBranch(false);
 def LOOP = (fun (i: int) => PathType.ForILoop(i));
+def CASE = (fun (i: int) => PathType.SwitchCase(Int.box(i)));
 
 def testIfElseStmt(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(t.genIfElseConstStmt(true, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
@@ -477,6 +547,10 @@ def testForLoop(t: PartialEvaluatorTester) {
 	t.assertCorrectTraversal(t.genForLoopWithForLoop(2, 3, _), [LOOP(0), LOOP(0), LOOP(1), LOOP(2), FALSE, LOOP(1), LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE]);
 	t.assertCorrectTraversal(t.genIfElseWithForLoops(true, 3, _), [TRUE, LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE, LOOP(0), FALSE]);
 	t.assertCorrectTraversal(t.genIfElseWithForLoops(false, 3, _), [TRUE, LOOP(0), FALSE, FALSE, LOOP(0), LOOP(1), LOOP(2), FALSE]);
+}
+
+def testSwitch(t: PartialEvaluatorTester) {
+	t.assertCorrectTraversal(t.genSwitch(2, [t.genBlock, t.genBlock, t.genBlock], _), [CASE(0), CASE(1), CASE(2)]);
 }
 
 
