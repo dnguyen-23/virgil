@@ -517,25 +517,30 @@ def LOOP = (fun (i: int) => PathType.ForILoop(i));
 def CASE = (fun (i: int) => PathType.SwitchCase(Int.box(i)));
 
 def testIfStmts(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(t.genIfElseConstStmt(true, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
-	t.assertCorrectTraversal(t.genIfElseConstStmt(false, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
-	t.assertCorrectTraversal(t.genIfStmt(false, t.genBlock, _), [TRUE]);
-	t.assertCorrectTraversal(t.genIfStmt(true, t.genBlock, _), [TRUE]);
+	def PATH = t.assertCorrectTraversal;
+	PATH(t.genIfElseConstStmt(true, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
+	PATH(t.genIfElseConstStmt(false, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
+	PATH(t.genIfStmt(false, t.genBlock, _), [TRUE]);
+	PATH(t.genIfStmt(true, t.genBlock, _), [TRUE]);
 }
 
 def testForLoop(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(t.genForLoop(3, t.genBlock, _), [LOOP(0), LOOP(1), LOOP(2), FALSE]);
-	t.assertCorrectTraversal(t.genForLoopWithIfElseStmt(3, true, _), [LOOP(0), TRUE, FALSE, LOOP(1), TRUE, FALSE, LOOP(2), TRUE, FALSE, FALSE]);
-	t.assertCorrectTraversal(t.genForLoopWithForLoop(2, 3, _), [LOOP(0), LOOP(0), LOOP(1), LOOP(2), FALSE, LOOP(1), LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE]);
-	t.assertCorrectTraversal(t.genIfElseWithForLoops(true, 3, _), [TRUE, LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE, LOOP(0), FALSE]);
-	t.assertCorrectTraversal(t.genIfElseWithForLoops(false, 3, _), [TRUE, LOOP(0), FALSE, FALSE, LOOP(0), LOOP(1), LOOP(2), FALSE]);
+	def PATH = t.assertCorrectTraversal;
+	PATH(t.genIfElseConstStmt(true, t.genBlock, t.genBlock, _), [TRUE, FALSE]);
+	PATH(t.genForLoop(3, t.genBlock, _), [LOOP(0), LOOP(1), LOOP(2), FALSE]);
+	PATH(t.genForLoopWithIfElseStmt(3, true, _), [LOOP(0), TRUE, FALSE, LOOP(1), TRUE, FALSE, LOOP(2), TRUE, FALSE, FALSE]);
+	PATH(t.genForLoopWithForLoop(2, 3, _), [LOOP(0), LOOP(0), LOOP(1), LOOP(2), FALSE, LOOP(1), LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE]);
+	PATH(t.genIfElseWithForLoops(true, 3, _), [TRUE, LOOP(0), LOOP(1), LOOP(2), FALSE, FALSE, LOOP(0), FALSE]);
+	PATH(t.genIfElseWithForLoops(false, 3, _), [TRUE, LOOP(0), FALSE, FALSE, LOOP(0), LOOP(1), LOOP(2), FALSE]);
+	PATH(t.genForLoop(3, t.genSwitch(1, [t.genBlock, t.genBlock, t.genBlock], _), _), [LOOP(0), CASE(0), CASE(1), CASE(2), LOOP(1), CASE(0), CASE(1), CASE(2), LOOP(2), CASE(0), CASE(1), CASE(2), FALSE]);
 }
 
 def testSwitch(t: PartialEvaluatorTester) {
-	t.assertCorrectTraversal(t.genSwitch(2, [t.genBlock, t.genBlock, t.genBlock], _), [CASE(0), CASE(1), CASE(2)]);
-	t.assertCorrectTraversal(t.genSwitch(2, [t.genBlock, t.genForLoop(10, t.genBlock, _), t.genBlock], _), [CASE(0), CASE(1), LOOP(0), FALSE, CASE(2)]);
-	t.assertCorrectTraversal(t.genSwitch(1, [t.genBlock, t.genForLoop(3, t.genBlock, _), t.genBlock], _), [CASE(0), CASE(1), LOOP(0), LOOP(1), LOOP(2), FALSE, CASE(2)]);
-	t.assertCorrectTraversal(t.genSwitch(0, [t.genForLoop(3, t.genBlock, _), t.genBlock, t.genBlock], _), [CASE(0), LOOP(0), LOOP(1), LOOP(2), FALSE, CASE(1), CASE(2)]);
-	t.assertCorrectTraversal(t.genSwitch(1, [t.genForLoop(3, t.genBlock, _), t.genBlock, t.genBlock], _), [CASE(0), LOOP(0), FALSE, CASE(1), CASE(2)]);
-	t.assertCorrectTraversal(t.genSwitch(2, [t.genBlock, t.genBlock, t.genForLoop(3, t.genBlock, _)], _), [CASE(0), CASE(1), CASE(2), LOOP(0), LOOP(1), LOOP(2), FALSE]);
+	def PATH = t.assertCorrectTraversal;
+	PATH(t.genSwitch(2, [t.genBlock, t.genBlock, t.genBlock], _), [CASE(0), CASE(1), CASE(2)]);
+	PATH(t.genSwitch(2, [t.genBlock, t.genForLoop(10, t.genBlock, _), t.genBlock], _), [CASE(0), CASE(1), LOOP(0), FALSE, CASE(2)]);
+	PATH(t.genSwitch(1, [t.genBlock, t.genForLoop(3, t.genBlock, _), t.genBlock], _), [CASE(0), CASE(1), LOOP(0), LOOP(1), LOOP(2), FALSE, CASE(2)]);
+	PATH(t.genSwitch(0, [t.genForLoop(3, t.genBlock, _), t.genBlock, t.genBlock], _), [CASE(0), LOOP(0), LOOP(1), LOOP(2), FALSE, CASE(1), CASE(2)]);
+	PATH(t.genSwitch(1, [t.genForLoop(3, t.genBlock, _), t.genBlock, t.genBlock], _), [CASE(0), LOOP(0), FALSE, CASE(1), CASE(2)]);
+	PATH(t.genSwitch(2, [t.genBlock, t.genBlock, t.genForLoop(3, t.genBlock, _)], _), [CASE(0), CASE(1), CASE(2), LOOP(0), LOOP(1), LOOP(2), FALSE]);
 }
