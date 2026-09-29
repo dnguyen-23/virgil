@@ -60,86 +60,7 @@ class PartialEvaluator {
 	def addNewBlockContextToMap(block: SsaBlock, newContext: PEBlockContext) {
 		def oldContextList = blockContextsMap[block];
 		blockContextsMap[block] = List.new(newContext, oldContextList);
-	}
-
-	/**
-	 * Intersects two maps and returns the result.
-	 */
-	def intersect(
-		m1: HashMap<OptMapKey, SsaInstr>, 
-		m2: HashMap<OptMapKey, SsaInstr>
-	) -> HashMap<OptMapKey, SsaInstr> {
-		def keys1 = Maps.keyList(m1);
-		def keys2 = Maps.keyList(m2);
-		if (keys1 == null) return Maps.copy(m1);
-		if (keys2 == null) return Maps.copy(m2);
-		def keys = if(Lists.length(keys1) < Lists.length(keys2), keys1, keys2);
-		def newMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.equals);
-		for (l = keys; l != null; l = l.tail) {
-			def k = l.head;
-			def bothHaveKey = m1.has(k) && m2.has(k);
-			if (!bothHaveKey) continue;
-			def m1Val = m1[k];
-			def m2Val = m2[k];
-			var sameInstr = m1Val == m2Val;
-			if (SsaApplyOp.?(m1Val) && SsaApplyOp.?(m2Val)) {
-				// Already know inputs and operator are the 
-				// same because OptMapKey is the same
-				sameInstr = true;
-			}
-			if (!sameInstr) continue;
-			newMap[k] = m1Val;
-		}
-
-		return newMap;
-	}
-
-	def mergeContexts(preds: Array<SsaBlock>) -> PEBlockContext {
-		if (preds.length == 0) return null;
-		def predContext = getLatestBlockContext(preds[0]);
-		if (predContext == null) throwNoContextsFound(preds[0]);
-		if (preds.length == 1) return PEBlockContext.new(predContext);
-
-		var resultMap: HashMap<OptMapKey, SsaInstr> = predContext.optMap;
-		for (i = 1; i < preds.length; i++) {
-			def context = getLatestBlockContext(preds[i]);
-			if (context == null) throwNoContextsFound(preds[i]);
-			resultMap = intersect(resultMap, context.optMap);
-		}
-		def mergedContext = PEBlockContext.new(null);
-		mergedContext.optMap = HashMap<OptMapKey, SsaInstr>.!(resultMap);
-		return mergedContext;
-	}
-
-
-	/**
-	 * Takes the contexts of the live predecessors and 
-	 * merges the contexts together to create the context for
-	 * the current block.
-	 */
-	def mergeLivePredContexts(block: SsaBlock) -> PEBlockContext {
-		def cfToBlock = fun (cf: SsaCfEdge) => cf.src.block();
-		def allPredBlocks = Arrays.map(block.preds, cfToBlock);
-		def cond = fun (b: SsaBlock) => getLatestBlockContext(b).live;
-
-		def livePreds = Arrays.filter(allPredBlocks, cond);
-		if (livePreds.length == 0) throwNoLivePredsFound(block);
-		def mergedContext = mergeContexts(livePreds);
-		return mergedContext;
-	}
-
-	/**
-	 * Takes the context of a predecessor block and copies it 
-	 * to create the context for the current block.
-	 */
-	def copyPredContext(block: SsaBlock, predIdx: int) -> PEBlockContext {
-		def cfEdge: SsaCfEdge = block.preds[predIdx];
-		def pred: SsaBlock = cfEdge.src.block();
-		def latestPredContext = getLatestBlockContext(pred);
-		if (latestPredContext == null) throwNoContextsFound(pred);
-		def newContext = PEBlockContext.new(latestPredContext);
-		return newContext;
-	}
+	}	
 
 	/**
 	 * Checks whether the current block is a header block of a 
@@ -149,115 +70,6 @@ class PartialEvaluator {
 		return (loopStack != null && 
 			!loopStack.head.hasLoopEvalStarted && 
 			headerToLoop.has(block));
-	}
-
-	/**
-	 * Iterates over the predecessors of a block to check if 
-	 * the current block is live.
-	 */
-	def arePredsDead(block: SsaBlock) -> bool {
-		var isDead = true;
-
-		// Check if the block is a loop header and we haven't traversed the loop yet
-		if (isHeaderOfNewLoop(block)) {
-			// Only consider the first pred
-			def firstPred = block.preds[0].src.block();
-			def predContext = getLatestBlockContext(firstPred);
-			return !predContext.live;
-		}
-
-		for (p in block.preds) {
-			def predBlock = p.src.block();
-			def predContext = getLatestBlockContext(predBlock);
-			if (predContext.live) isDead = false;
-		}
-		return isDead;
-	}
-
-	/**
-	 * Checks if the first block on a branch is part of a dead branch
-	 * or a live branch.
-	 */
-	def startsDeadBranch(block: SsaBlock) -> bool {
-		if (block.preds.length != 1 &&
-		   !SsaIf.?(block.preds[0].src) && 
-		   !SsaSwitch.?(block.preds[0].src)) {
-			return false;
-		}
-		// Check the condition
-		def predEnd = block.preds[0].src;
-		def origCond = predEnd.input0();
-		def predContext = getLatestBlockContext(predEnd.block());
-		def cond = predContext.getOptInstr(origCond);
-		if (SsaIf.?(predEnd)) {
-			def ifStmt = SsaIf.!(predEnd);
-			if (!SsaConst.?(cond)) return false;
-			def rawCond = Bool.unbox(SsaConst.!(cond).val);
-			if ((rawCond && block == ifStmt.trueBlock()) ||
-			    (!rawCond && block == ifStmt.falseBlock())) {
-				return false;
-			}
-			return true;
-		}
-		// SsaSwitch
-		def switchStmt = SsaSwitch.!(predEnd);
-		if (!SsaConst.?(cond)) return false;
-		def constCond = SsaConst.!(cond);
-		def liveCf = switchStmt.findSucc(constCond.val);
-		// Dead branch is one that doesn't match live control flow 
-		return liveCf.dest != block;
-	}
-
-	/**
-	 * Creates a block context for the block given information about it.
-	 */
-	def createContextForBlock(block: SsaBlock) -> PEBlockContext {
-		if (block.preds.length == 0) {
-			// Base case: Start block in CFG
-			def newContext = PEBlockContext.new(null);
-			addNewBlockContextToMap(block, newContext);
-			return newContext;
-		}
-
-		// Check whether the block is live or dead
-		if (arePredsDead(block) || startsDeadBranch(block)) {
-			def newContext = PEBlockContext.new(null);
-			newContext.live = false;
-			addNewBlockContextToMap(block, newContext);
-			return newContext;
-		}
-
-		if (block.preds.length == 1) {
-			// Build context off of sole predecessor
-			def newContext = copyPredContext(block, 0);
-			addNewBlockContextToMap(block, newContext);
-			return newContext;
-		}
-
-		
-		// Merge block: Evaluating blocks with more than 1 pred
-
-		if (!headerToLoop.has(block)) {
-			// Not a loop merge block
-			def newContext = mergeLivePredContexts(block);
-			addNewBlockContextToMap(block, newContext);
-			return newContext;
-		} 
-		// Merge block is a loop header block
-		// if (DEBUG) Terminal.put("\tLoop merge block\n");
-		if (!loopStack.head.hasLoopEvalStarted) {
-			// Loop body untraversed. Entering loop
-			def newContext = copyPredContext(block, 0);
-			addNewBlockContextToMap(block, newContext);
-			return newContext;
-
-		}
-		// Loop body traversed
-		// Merge the parent preheader context with the 
-		// previous live context
-		def newContext = mergeLivePredContexts(block);
-		addNewBlockContextToMap(block, newContext);
-		return newContext;
 	}
 
 	/**
@@ -511,7 +323,9 @@ class PartialEvaluator {
 		updateLoopStack(block);
 
 		// TODO: identifiers for reusing contexts
-		def blockContext = createContextForBlock(block);
+		def curLoop = if(loopStack == null, null, loopStack.head);
+		def blockContext = PEBlockContext.new(block, getLatestBlockContext, curLoop);
+		addNewBlockContextToMap(block, blockContext);
 		worklist = worklist.tail;
 
 		if (DEBUG) putBlock(block);
@@ -670,14 +484,157 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
  *
  * How do you use the map: replace all usages with the 
  * instruction we map to.
+ *
+ * Conventions:
+ * If the context is dead, then predContexts is null.
+ * If the context is live, then predContexts is non-null. Note that 
+ * predContexts can be empty, particularly for the case of the root context
  */
 class PEBlockContext {
+	var predContexts: Array<PEBlockContext>;
 	var optMap = HashMap<OptMapKey, SsaInstr>.new(OptMapKey.hash, OptMapKey.equals);
-	var live: bool = true;
-	new(predContext: PEBlockContext) {
-		if (predContext != null) {
-			optMap = Maps.copy<OptMapKey, SsaInstr>(predContext.optMap);
-			live = predContext.live;
+	var live = false;
+	def block: SsaBlock;
+	new(block, blockToContext: SsaBlock -> PEBlockContext, curLoop: LoopIterInfo) { 
+		def cfEdgeToBlock = (fun (cf: SsaCfEdge) => cf.src.block());
+		def predBlocks = Arrays.map(block.preds, cfEdgeToBlock);
+		// Case on whether the context starts a loop context
+		def isCurLoopHeader = curLoop != null && (curLoop.info.start == block.info.srpo_num);
+		if (startsDeadBranch(blockToContext)) {
+			createDeadContext();
+		} else if (isCurLoopHeader) {
+			createLoopHeaderContext(predBlocks, blockToContext, curLoop);
+		} else {
+			createNonLoopHeaderContext(predBlocks, blockToContext, curLoop);
+		}
+	}
+
+	/**
+	 * Creates a dead context.
+	 * 
+	 * Not tracking predecessors for dead contexts because
+	 * it's a waste of memory. For live contexts, tracking dead
+	 * contexts would make optimized instruction lookup more inefficient.
+	 */
+	def createDeadContext() {
+		predContexts = null;
+		live = false;
+	}
+
+	/**
+	 * Creates a context for a loop header block.
+	 * 
+	 * If the first iteration of the loop hasn't been
+	 * partially evaluated yet, then only consider the live
+	 * non-loop predecessors. This case includes the situation where 
+	 * a loop has been previously evaluated and the partial evaluator
+	 * is entering it once more. 
+	 * 
+	 * Otherwise, if the loop is being partially evaluated, then 
+	 * only consider the live backedge-source predecessors.
+	 */
+	def createLoopHeaderContext(
+		predBlocks: Array<SsaBlock>,
+		blockToContext: SsaBlock -> PEBlockContext, 
+		curLoop: LoopIterInfo
+	) {
+		var allContexts: Array<PEBlockContext>;
+		if (!curLoop.hasLoopEvalStarted) {
+			// Take only predecessors not in the loop
+			def notInLoop = (fun (b: SsaBlock) => !curLoop.info.contains(b));
+			def nonLoopPreds = Arrays.filter(predBlocks, notInLoop);
+			allContexts = Arrays.map(nonLoopPreds, blockToContext);
+		} else {
+			// Take only predecessors in the loop
+			def backedgePreds = Arrays.filter(predBlocks, curLoop.info.contains);
+			allContexts = Arrays.map(backedgePreds, blockToContext);
+		}
+		def liveContexts = Arrays.filter(allContexts, PEBlockContext.live);
+		mergeContexts(liveContexts);
+		live = predContexts != null;
+	}
+
+	/**
+	 * Creates a context for a block that isn't a loop header.
+	 */
+	def createNonLoopHeaderContext(
+		predBlocks: Array<SsaBlock>,
+		blockToContext: SsaBlock -> PEBlockContext, 
+		curLoop: LoopIterInfo
+	) {
+		if (predBlocks.length == 0) {
+			// root context
+			predContexts = [];
+			live = true;
+			return;
+		}
+		def allContexts = Arrays.map(predBlocks, blockToContext);
+		def liveContexts = Arrays.filter(allContexts, PEBlockContext.live);
+		mergeContexts(liveContexts);
+		live = liveContexts.length > 0;
+	}
+
+	/**
+	 * Checks if the first block on a branch is part of a dead branch
+	 * or a live branch.
+	 */
+	def startsDeadBranch(blockToContext: SsaBlock -> PEBlockContext) -> bool {
+		if (block.preds.length != 1) return false;
+		def predEnd = block.preds[0].src;
+		match (predEnd) {
+			ifStmt: SsaIf => {
+				// Check the condition
+				def origCond = predEnd.input0();
+				def predContext = blockToContext(predEnd.block());
+				def cond = predContext.getOptInstr(origCond);
+
+				if (!SsaConst.?(cond)) return false;
+				def rawCond = Bool.unbox(SsaConst.!(cond).val);
+				if ((rawCond && block == ifStmt.trueBlock()) ||
+				    (!rawCond && block == ifStmt.falseBlock())) {
+					return false;
+				}
+				return true;
+			}
+			switchStmt: SsaSwitch => {
+				// Check the condition
+				def origCond = predEnd.input0();
+				def predContext = blockToContext(predEnd.block());
+				def cond = predContext.getOptInstr(origCond);
+
+				if (!SsaConst.?(cond)) return false;
+				def constCond = SsaConst.!(cond);
+				def liveCf = switchStmt.findSucc(constCond.val);
+				// Dead branch is one that doesn't match live control flow 
+				return liveCf.dest != block;
+			}
+			_ => {
+				return false;
+			}
+		}
+	}
+
+
+	/**
+	 * Merges information across predecessor contexts if there are 
+	 * multiple predecessors. Otherwise, noop.
+	 *
+	 * Requires the input array of predecessor contexts to all be 
+	 * live contexts.
+	 */
+	def mergeContexts(liveContexts: Array<PEBlockContext>) {
+		if (liveContexts.length == 0) {
+			predContexts = null;
+			return;
+		}
+		predContexts = liveContexts;
+		if (predContexts.length == 1) return;
+
+		// merge optimization maps
+		optMap = predContexts[0].optMap;
+		for (i = 1; i < predContexts.length; i++) {
+			def context = predContexts[i];
+			optMap = Maps.intersect(optMap, context.optMap);
 		}
 	}
 
@@ -788,15 +745,21 @@ class PEBlockContext {
 	}
 
 	def hasOptInstr(i: SsaInstr) -> bool {
-		def key = instrToOptMapKey(i);
-		return optMap.has(key);
+		return getOptInstr(i) != null;
 	}
 
 	def getOptInstr(i: SsaInstr) -> SsaInstr {
+		if (!live) return null;
 		if (SsaConst.?(i)) return i;
 		def key = instrToOptMapKey(i);
-		if (!optMap.has(key)) return null;
-		return optMap[key];
+		var curOptMap = optMap;
+		var curContext: PEBlockContext = this;
+		while (!curOptMap.has(key)) {
+			if (curContext.predContexts.length != 1) return null;
+			curContext = curContext.predContexts[0];
+			curOptMap = curContext.optMap;
+		}
+		return curOptMap[key];
 	}
 }
 
