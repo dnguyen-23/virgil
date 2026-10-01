@@ -16,6 +16,7 @@ class PartialEvaluator {
 	def blockOrder: SsaBlockOrder;
 	def instrReducer: SsaInstrReducer;
 	var worklist: List<SsaBlock>;
+	var nextBlock: SsaBlock;
 	def blockContextsMap = Ssa.newBlockMap<List<PEBlockContext>>();
 	def headerToLoop = Ssa.newBlockMap<SsaLoopInfo>();
 	var loopStack: List<LoopIterInfo>;
@@ -40,8 +41,8 @@ class PartialEvaluator {
 	def evaluate() { 
 		def ordering: Vector<SsaBlock> = blockOrder.order;
 		if (ordering.length == 0) return;
-		worklist = Lists.cons1<SsaBlock>(ordering[0]);
-		while (worklist != null) evalSsaBlock();
+		nextBlock = ordering[0];
+		while (nextBlock != null) evalSsaBlock();
 		if (DEBUG) Terminal.put("Finished partial evaluation\n\n");
 	}
 
@@ -207,16 +208,20 @@ class PartialEvaluator {
 	def evalSsaGoto(goto: SsaGoto) {
 		def target: SsaBlock = goto.target();
 		def curBlock: SsaBlock = goto.block();
-		// Check if goto target is next in SRPO ordering
-		// If next, then push the target to the worklist
-		def isNextSRPO = curBlock.info.srpo_num + 1 == target.info.srpo_num;
-		def isBackedge = headerToLoop.has(target);
-		if (isNextSRPO || isBackedge) {
-			worklist = List.new(target, worklist);
-			return;
+		// Loop traversal logic
+		def inHeaderLoop = loopStack != null && loopStack.head.info.start == target.info.srpo_num;
+		def isBackedge = headerToLoop.has(target) && inHeaderLoop;
+		if (isBackedge) {
+			def targetContext = getLatestBlockContext(target);
+			def isLoopLive = targetContext.live;
+			if (isLoopLive) {
+				nextBlock = target;
+				return;
+			}
+			// If loop is dead, follow SRPO
 		}
-		// Else noop: there's an input branch we need to evaluate first
-		// Should have been enqueued when evaluating the if-stmt block
+		// Non-loop logic or dead loop 
+		nextBlock = blockOrder.order[curBlock.info.srpo_num + 1];
 	}
 
 	/**
@@ -224,30 +229,32 @@ class PartialEvaluator {
 	 */
 	def evalSsaIf(ifStmt: SsaIf, blockContext: PEBlockContext) {
 		// Loop guard
-		if (headerToLoop.has(ifStmt.block()) && blockContext.live) {
-			loopStack.head.hasLoopEvalStarted = true;
-			def cond = blockContext.getOptInstr(ifStmt.input0());
-			if (SsaConst.?(cond)) {
-				def rawCond = Bool.unbox(SsaConst.!(cond).val);
-				if (rawCond) worklist = List.new(ifStmt.trueBlock(), worklist);
-				else worklist = List.new(ifStmt.falseBlock(), worklist);
+		if (headerToLoop.has(ifStmt.block()))  {
+			if (blockContext.live) {
+				loopStack.head.hasLoopEvalStarted = true;
+				def cond = blockContext.getOptInstr(ifStmt.input0());
+				if (SsaConst.?(cond)) {
+					def rawCond = Bool.unbox(SsaConst.!(cond).val);
+					if (rawCond) nextBlock = ifStmt.trueBlock();
+					else nextBlock = ifStmt.falseBlock();
+					return;
+				}
+			} else  {
+				def curLoop = loopStack.head;
+				// If the loop is dead, we evaluate it once
+				// to propagate info on which blocks are dead
+				if (curLoop.hasLoopEvalStarted) {
+					nextBlock = ifStmt.falseBlock();
+				} else {
+					curLoop.hasLoopEvalStarted = true;
+					nextBlock = ifStmt.trueBlock();
+				}
 				return;
 			}
-		} else if (headerToLoop.has(ifStmt.block()) && !blockContext.live) {
-			def curLoop = loopStack.head;
-			// If the loop is dead, we evaluate it once
-			// to propagate info on which blocks are dead
-			if (curLoop.hasLoopEvalStarted) {
-				worklist = List.new(ifStmt.falseBlock(), worklist);
-			} else {
-				curLoop.hasLoopEvalStarted = true;
-				worklist = List.new(ifStmt.trueBlock(), worklist);
-			}
-			return;
 		}
 
-		worklist = List<SsaBlock>.new(ifStmt.falseBlock(), worklist);
-		worklist = List<SsaBlock>.new(ifStmt.trueBlock(), worklist);
+		// Follow the SRPO ordering
+		nextBlock = ifStmt.trueBlock();
 		if (headerToLoop.has(ifStmt.block())) {
 			loopStack.head.hasLoopEvalStarted = true;
 		}
@@ -256,12 +263,8 @@ class PartialEvaluator {
 	/**
 	 * Evaluate SsaSwitch
 	 */
-	def evalSsaSwitch(switch: SsaSwitch, blockContext: PEBlockContext) {
-		// Push branches into worklist
-		for (i = switch.succs.length - 1; i >= 0; i--) {
-			def succ = switch.succs[i].dest;
-			worklist = List.new(succ, worklist);
-		}
+	def evalSsaSwitch(switch: SsaSwitch) {
+		nextBlock = blockOrder.order[switch.block().info.srpo_num + 1];
 	}
 
 	def putBlock(block: SsaBlock) {
@@ -315,18 +318,16 @@ class PartialEvaluator {
 	}
 	
 	/**
-	 * Evaluate the next block in the worklist. 
+	 * Evaluate the next block
 	 */
 	def evalSsaBlock() {
-		if (worklist == null) return;
-		def block: SsaBlock = worklist.head;
+		def block: SsaBlock = nextBlock;
 		updateLoopStack(block);
 
 		// TODO: identifiers for reusing contexts
 		def curLoop = if(loopStack == null, null, loopStack.head);
 		def blockContext = PEBlockContext.new(block, getLatestBlockContext, curLoop);
 		addNewBlockContextToMap(block, blockContext);
-		worklist = worklist.tail;
 
 		if (DEBUG) putBlock(block);
 
@@ -346,18 +347,20 @@ class PartialEvaluator {
 			if (DEBUG && SsaInstr.?(link)) putInstr(SsaInstr.!(link), blockContext);
 		}
 		if (DEBUG) blockContext.printContext(Lists.length(loopStack), printer, DEBUG_CTX);
+		def ordering = blockOrder.order;
+		if (block == ordering[ordering.length - 1]) nextBlock = null;
 		return;
 	}
 
 	// Returns the SRPO index to resume partial evaluation at 
 	def evalSsaEnd(end: SsaEnd, blockContext: PEBlockContext) {
-		// Partial evaluator is called after switches have been lowered to if statements
+		// Partial evaluator is called after switches have been lowered to if statements 
 		match (end) {
 			x: SsaReturn, 
 			x: SsaThrow => return; // TODO: how do we know when to end
 			x: SsaIf => evalSsaIf(x, blockContext);
 			x: SsaGoto => evalSsaGoto(x);
-			x: SsaSwitch => evalSsaSwitch(x, blockContext);
+			x: SsaSwitch => evalSsaSwitch(x);
 			_ => return;
 		}
 	}

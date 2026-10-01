@@ -21,9 +21,9 @@ class MockedPartialEvaluator extends PartialEvaluator {
 	def evaluate() { 
 		def ordering: Vector<SsaBlock> = blockOrder.order;
 		if (ordering.length == 0) return;
-		worklist = Lists.cons1<SsaBlock>(ordering[0]);
-		while (worklist != null) {
-			assertCorrectPathChoice(worklist.head);
+		nextBlock = ordering[0];
+		while (nextBlock != null) {
+			assertCorrectPathChoice(nextBlock);
 			evalSsaBlock();
 		}
 		if (expectedPath != null) t.fail("Expected all paths traversed");
