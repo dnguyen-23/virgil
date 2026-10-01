@@ -10,7 +10,7 @@
 class PartialEvaluator {
 	// ----------------- Constants -----------------
 	def DEBUG = true;
-	def DEBUG_CTX = false;
+	def DEBUG_CTX = true;
 	def DEBUG_INSTR = false;
 	// ----------------- Helpers -----------------
 	def blockOrder: SsaBlockOrder;
@@ -412,14 +412,14 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 		match (instr) {
 			x: SsaApplyOp => {
 				hashResult = x.op.opcode.tag;
-			   }
+			}
 			x: SsaPhi => {
 				// There are much less opcodes than this
 				hashResult = 300;
-			   }
+			}
 			x: SsaParam => {
 				hashResult = 301;
-			   }
+			}
 			_ => {
 				def msg = Strings.format1("Unsupported instruction type for instr: %d.\n", instr.uid);
 				System.error("PartialEvaluationException", msg);
@@ -430,6 +430,10 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 		return hashResult;
 	}
 
+	def getApplyOpFacts(app: SsaApplyOp) -> Fact.set {
+		return Opcodes.facts(app.op.opcode);
+	}
+
 	/**
 	 * Implicitly takes as input an OptMapKey additional when called
 	 * off of the type identifier
@@ -438,8 +442,14 @@ type OptMapKey(instr: SsaInstr, inputs: Array<SsaInstr>) {
 		match (that.instr) {
 			x: SsaApplyOp => {
 				if (!SsaApplyOp.?(this.instr)) return false;
-				if (x.op != SsaApplyOp.!(this.instr).op) return false;
-				// TODO: take care of commutative operations
+				def thisApp = SsaApplyOp.!(this.instr);
+				if (x.op != thisApp.op) return false;
+				def facts = getApplyOpFacts(thisApp);
+				if (!facts.O_PURE) return this == that;
+				if (facts.O_COMMUTATIVE) {
+					def rev = Arrays.reverse(this.inputs);
+					if (Arrays.allTrue(rev, that.inputs, SsaInstr.==)) return true;
+				}
 				return  Arrays.allTrue(this.inputs, that.inputs, SsaInstr.==);
 			   }
 			x: SsaParam,
