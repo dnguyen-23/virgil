@@ -18,16 +18,11 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		expectedPath = assertHelpers.expectedPath;
 	}
 
-	def evaluate() { 
-		def ordering: Vector<SsaBlock> = blockOrder.order;
-		if (ordering.length == 0) return;
-		nextBlock = ordering[0];
-		while (nextBlock != null) {
-			assertCorrectPathChoice(nextBlock);
-			evalSsaBlock();
-		}
-		if (expectedPath != null) t.fail("Expected all paths traversed");
-		if (DEBUG) Terminal.put("Finished partial evaluation\n\n");
+	// Override
+	def resumeEval() -> bool {
+		def shouldResume = nextBlock != null;
+		if (shouldResume) assertCorrectPathChoice();
+		return shouldResume;
 	}
 
 	def popFromExpectedPath() -> PathType {
@@ -117,7 +112,8 @@ class MockedPartialEvaluator extends PartialEvaluator {
 		t.fail(msg);
 	}
 
-	def assertCorrectPathChoice(curBlock: SsaBlock) {
+	def assertCorrectPathChoice() {
+		def curBlock = nextBlock;
 		if (curBlock.preds.length != 1) return;
 		def predEnd: SsaEnd = curBlock.preds[0].src;
 		def pred: SsaBlock = predEnd.block();

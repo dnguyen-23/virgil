@@ -42,8 +42,20 @@ class PartialEvaluator {
 		def ordering: Vector<SsaBlock> = blockOrder.order;
 		if (ordering.length == 0) return;
 		nextBlock = ordering[0];
-		while (nextBlock != null) evalSsaBlock();
+		while (resumeEval()) evalSsaBlock();
 		if (DEBUG) Terminal.put("Finished partial evaluation\n\n");
+	}
+
+	/**
+	 * Returns whether or not partial eval should continue.
+	 * NOTE: Partial evaluation logic may change so the conditions
+	 * for when partial evaluation should end may also change. 
+	 *
+	 * This function also serves as an opportunity for a mock
+	 * class to perform checks on each iteration of the partial evaluator.
+	 */
+	def resumeEval() -> bool {
+		return nextBlock != null;
 	}
 
 	/**
